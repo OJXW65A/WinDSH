@@ -1,0 +1,21 @@
+# WinDSH generated reports/logs
+WinDSH-Reports/
+WinDSH-Debug-*.log
+
+# Release packages
+*.zip
+
+# Test results
+TestResults/
+*.TestResults.xml
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
