@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
+
   workflow_dispatch:
 
 jobs:
@@ -18,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Verify PowerShell version
+      - name: Show PowerShell version
         shell: powershell
         run: |
           $PSVersionTable
@@ -26,18 +28,21 @@ jobs:
       - name: Parse WinDSH.ps1
         shell: powershell
         run: |
-          $errors = $null
           $tokens = $null
+          $parseErrors = $null
 
           [System.Management.Automation.Language.Parser]::ParseFile(
               "$env:GITHUB_WORKSPACE\WinDSH.ps1",
               [ref]$tokens,
-              [ref]$errors
+              [ref]$parseErrors
           ) | Out-Null
 
-          if ($errors.Count -gt 0) {
+          if (@($parseErrors).Count -gt 0) {
               Write-Host "PowerShell syntax errors found:" -ForegroundColor Red
-              $errors | Format-List
+
+              $parseErrors |
+                  Format-List Message, Extent, ErrorId
+
               exit 1
           }
 
@@ -46,27 +51,32 @@ jobs:
       - name: Install PSScriptAnalyzer
         shell: powershell
         run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
           Install-Module PSScriptAnalyzer `
-            -Scope CurrentUser `
-            -Force `
-            -Repository PSGallery
+              -Scope CurrentUser `
+              -Force `
+              -Repository PSGallery
 
       - name: Run PSScriptAnalyzer
         shell: powershell
         run: |
-          $results = Invoke-ScriptAnalyzer `
-            -Path "$env:GITHUB_WORKSPACE\WinDSH.ps1" `
-            -Recurse
+          $results = @(
+              Invoke-ScriptAnalyzer `
+                  -Path "$env:GITHUB_WORKSPACE\WinDSH.ps1"
+          )
 
-          if ($results) {
+          if ($results.Count -gt 0) {
               $results |
-                Select-Object RuleName, Severity, Line, Message |
-                Format-Table -AutoSize
+                  Select-Object RuleName, Severity, Line, Message |
+                  Format-Table -AutoSize
           }
 
           $errors = @(
               $results |
-              Where-Object Severity -eq 'Error'
+                  Where-Object {
+                      $_.Severity -eq 'Error'
+                  }
           )
 
           if ($errors.Count -gt 0) {
@@ -76,7 +86,51 @@ jobs:
           }
 
           Write-Host ""
-          Write-Host "PSScriptAnalyzer completed." -ForegroundColor Green
+          Write-Host "PSScriptAnalyzer completed without errors." -ForegroundColor Green
+
+      - name: Install Pester
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          Install-Module Pester `
+              -RequiredVersion 5.9.1 `
+              -Scope CurrentUser `
+              -Force `
+              -Repository PSGallery
+
+      - name: Run Pester tests
+        shell: powershell
+        run: |
+          Import-Module Pester `
+              -RequiredVersion 5.9.1 `
+              -Force
+
+          $configuration = New-PesterConfiguration
+
+          $configuration.Run.Path = "$env:GITHUB_WORKSPACE\tests"
+          $configuration.Run.PassThru = $true
+
+          $configuration.Output.Verbosity = 'Detailed'
+
+          $result = Invoke-Pester `
+              -Configuration $configuration
+
+          if ($result.FailedCount -gt 0) {
+              Write-Host ""
+              Write-Host (
+                  "Pester failed: {0} test(s) failed." -f
+                  $result.FailedCount
+              ) -ForegroundColor Red
+
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host (
+              "Pester passed: {0} test(s)." -f
+              $result.PassedCount
+          ) -ForegroundColor Green
 
 
   powershell-7:
@@ -87,7 +141,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Verify PowerShell version
+      - name: Show PowerShell version
         shell: pwsh
         run: |
           $PSVersionTable
@@ -95,19 +149,102 @@ jobs:
       - name: Parse WinDSH.ps1
         shell: pwsh
         run: |
-          $errors = $null
           $tokens = $null
+          $parseErrors = $null
 
           [System.Management.Automation.Language.Parser]::ParseFile(
               "$env:GITHUB_WORKSPACE\WinDSH.ps1",
               [ref]$tokens,
-              [ref]$errors
+              [ref]$parseErrors
           ) | Out-Null
 
-          if ($errors.Count -gt 0) {
+          if (@($parseErrors).Count -gt 0) {
               Write-Host "PowerShell syntax errors found."
-              $errors | Format-List
+
+              $parseErrors |
+                  Format-List Message, Extent, ErrorId
+
               exit 1
           }
 
           Write-Host "PowerShell 7 syntax check passed."
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer `
+              -Scope CurrentUser `
+              -Force `
+              -Repository PSGallery
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = @(
+              Invoke-ScriptAnalyzer `
+                  -Path "$env:GITHUB_WORKSPACE\WinDSH.ps1"
+          )
+
+          if ($results.Count -gt 0) {
+              $results |
+                  Select-Object RuleName, Severity, Line, Message |
+                  Format-Table -AutoSize
+          }
+
+          $errors = @(
+              $results |
+                  Where-Object {
+                      $_.Severity -eq 'Error'
+                  }
+          )
+
+          if ($errors.Count -gt 0) {
+              Write-Host ""
+              Write-Host "PSScriptAnalyzer errors detected."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "PSScriptAnalyzer completed without errors."
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Install-Module Pester `
+              -RequiredVersion 5.9.1 `
+              -Scope CurrentUser `
+              -Force `
+              -Repository PSGallery
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Import-Module Pester `
+              -RequiredVersion 5.9.1 `
+              -Force
+
+          $configuration = New-PesterConfiguration
+
+          $configuration.Run.Path = "$env:GITHUB_WORKSPACE\tests"
+          $configuration.Run.PassThru = $true
+
+          $configuration.Output.Verbosity = 'Detailed'
+
+          $result = Invoke-Pester `
+              -Configuration $configuration
+
+          if ($result.FailedCount -gt 0) {
+              Write-Host ""
+              Write-Host (
+                  "Pester failed: {0} test(s) failed." -f
+                  $result.FailedCount
+              )
+
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host (
+              "Pester passed: {0} test(s)." -f
+              $result.PassedCount
+          )
