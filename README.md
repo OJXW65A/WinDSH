@@ -328,6 +328,10 @@ BTC address:
 
 `bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy`
 
+<p align="center">
+  <img src="assets/bitcoin-qr.jpg" alt="Bitcoin donation QR code" width="220">
+</p>
+
 ---
 
 ## License
