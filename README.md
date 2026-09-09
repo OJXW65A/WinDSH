@@ -311,6 +311,24 @@ WinDSH does not automatically upload reports, debug logs, hardware information,
 or other collected information.
 
 ---
+## Support WinDSH
+
+WinDSH is developed and maintained as a free and open-source personal project.
+
+If WinDSH is useful to you or your organization and you would like to support
+continued development, testing, documentation, and future code-signing costs,
+voluntary donations are appreciated.
+
+Donations are completely optional and do not affect access to WinDSH,
+its features, source code, or support for the MIT-licensed project.
+
+### Bitcoin
+
+`bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy`
+
+[Donate with Bitcoin](bitcoin:bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy)
+
+---
 
 ## License
 
