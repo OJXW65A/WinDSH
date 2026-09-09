@@ -314,6 +314,17 @@ or other collected information.
 
 ---
 
+## Contributing
+
+Bug reports, documentation improvements, tests, and carefully scoped code
+contributions are welcome.
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
+
+For security vulnerabilities, follow [SECURITY.md](SECURITY.md).
+
+---
+
 ## Support WinDSH
 
 WinDSH is developed and maintained as a free and open-source personal project.
