@@ -1,5 +1,7 @@
 # WinDSH
 
+[![WinDSH CI](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml/badge.svg)](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml)
+
 **Windows Device Security Helper**
 
 WinDSH is an open-source PowerShell utility for auditing Windows hardware-backed
