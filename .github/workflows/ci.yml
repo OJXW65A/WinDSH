@@ -1,0 +1,113 @@
+name: WinDSH CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  powershell-51:
+    name: Windows PowerShell 5.1
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify PowerShell version
+        shell: powershell
+        run: |
+          $PSVersionTable
+
+      - name: Parse WinDSH.ps1
+        shell: powershell
+        run: |
+          $errors = $null
+          $tokens = $null
+
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              "$env:GITHUB_WORKSPACE\WinDSH.ps1",
+              [ref]$tokens,
+              [ref]$errors
+          ) | Out-Null
+
+          if ($errors.Count -gt 0) {
+              Write-Host "PowerShell syntax errors found:" -ForegroundColor Red
+              $errors | Format-List
+              exit 1
+          }
+
+          Write-Host "Windows PowerShell 5.1 syntax check passed." -ForegroundColor Green
+
+      - name: Install PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Install-Module PSScriptAnalyzer `
+            -Scope CurrentUser `
+            -Force `
+            -Repository PSGallery
+
+      - name: Run PSScriptAnalyzer
+        shell: powershell
+        run: |
+          $results = Invoke-ScriptAnalyzer `
+            -Path "$env:GITHUB_WORKSPACE\WinDSH.ps1" `
+            -Recurse
+
+          if ($results) {
+              $results |
+                Select-Object RuleName, Severity, Line, Message |
+                Format-Table -AutoSize
+          }
+
+          $errors = @(
+              $results |
+              Where-Object Severity -eq 'Error'
+          )
+
+          if ($errors.Count -gt 0) {
+              Write-Host ""
+              Write-Host "PSScriptAnalyzer errors detected." -ForegroundColor Red
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "PSScriptAnalyzer completed." -ForegroundColor Green
+
+
+  powershell-7:
+    name: PowerShell 7
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify PowerShell version
+        shell: pwsh
+        run: |
+          $PSVersionTable
+
+      - name: Parse WinDSH.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          $tokens = $null
+
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              "$env:GITHUB_WORKSPACE\WinDSH.ps1",
+              [ref]$tokens,
+              [ref]$errors
+          ) | Out-Null
+
+          if ($errors.Count -gt 0) {
+              Write-Host "PowerShell syntax errors found."
+              $errors | Format-List
+              exit 1
+          }
+
+          Write-Host "PowerShell 7 syntax check passed."
