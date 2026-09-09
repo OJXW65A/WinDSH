@@ -7,7 +7,9 @@ certificate by [SignPath Foundation](https://signpath.org/).
 
 **WinDSH — Windows Device Security Helper**
 
-The official WinDSH source code is maintained in this GitHub repository.
+The official WinDSH source code is maintained in this GitHub repository:
+
+https://github.com/OJXW65A/WinDSH
 
 Only artifacts produced from the official WinDSH source repository are eligible
 for official project signing.
@@ -16,11 +18,11 @@ for official project signing.
 
 ### Committers and reviewers
 
-The WinDSH repository owner and authorized repository maintainers.
+- [OJXW65A](https://github.com/OJXW65A)
 
 ### Approvers
 
-The WinDSH repository owner.
+- [OJXW65A](https://github.com/OJXW65A)
 
 Every production release signing request requires manual approval.
 
@@ -32,8 +34,11 @@ GitHub Actions build and release workflow.
 The project will not use its signing capability to sign unrelated third-party
 software.
 
-Release artifacts must originate from the official source repository and
+Release artifacts must originate from the official source repository and the
 approved release workflow.
+
+Production signing requests must correspond to an identifiable WinDSH release,
+tag, or approved release artifact produced from the official repository.
 
 ## Privacy
 
@@ -48,6 +53,8 @@ WinDSH does not automatically upload:
 - reports
 - credentials
 - security configuration
+- TPM secrets or keys
+- encryption keys or recovery information
 
 ## System changes
 
@@ -59,15 +66,33 @@ WinDSH does not intentionally:
 - disable antivirus protection
 - create antivirus exclusions
 - bypass organization Group Policy
-- clear TPM keys
-- manage disk encryption
+- modify persistent PowerShell execution policy
+- clear or reset TPM keys
+- manage BitLocker or disk encryption
 - modify Secure Boot keys
-- download executable code
+- enable Secure Boot through undocumented firmware methods
+- download or execute remote code
+- use encoded or obfuscated PowerShell commands
 
 ## Signing security
 
-Signing credentials and signing-service API credentials must never be stored in
-the source repository.
+Signing credentials, API tokens, private keys, and signing-service credentials
+must never be stored in the source repository.
 
 Official release signatures must be produced through the project's approved
 SignPath signing workflow.
+
+The signing process must use artifacts originating from the official WinDSH
+repository and approved trusted build system.
+
+Signed release artifacts must not be modified after signing.
+
+## Verification
+
+Users and administrators should verify official signed releases using Windows
+Authenticode signature validation.
+
+For PowerShell releases, the signature can be inspected with:
+
+```powershell
+Get-AuthenticodeSignature .\WinDSH.ps1
