@@ -324,12 +324,10 @@ its features, source code, or support for the MIT-licensed project.
 
 ### Bitcoin
 
-BTC address:
-
 `bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy`
 
 <p align="center">
-  <img src="assets/bitcoin-qr.jpg" alt="Bitcoin donation QR code" width="220">
+  <img src="assets/bitcoin-qr.JPG" alt="Bitcoin donation QR code" width="220">
 </p>
 
 ---
