@@ -324,9 +324,9 @@ its features, source code, or support for the MIT-licensed project.
 
 ### Bitcoin
 
-`bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy`
+BTC address:
 
-[Donate with Bitcoin](bitcoin:bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy)
+`bc1qxevtatsn3gn9vzw57qtk4ys9j2gnn4c8ameagy`
 
 ---
 
