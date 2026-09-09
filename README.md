@@ -311,10 +311,10 @@ WinDSH does not automatically upload reports, debug logs, hardware information,
 or other collected information.
 
 ---
+
 ## Support WinDSH
 
 WinDSH is developed and maintained as a free and open-source personal project.
-
 If WinDSH is useful to you or your organization and you would like to support
 continued development, testing, documentation, and future code-signing costs,
 voluntary donations are appreciated.
