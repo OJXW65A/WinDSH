@@ -17,8 +17,47 @@ concurrency:
 env:
   PSSCRIPTANALYZER_VERSION: '1.24.0'
   PESTER_VERSION: '5.9.1'
+  ACTIONLINT_VERSION: '1.7.7'
+  # The release's own published checksum for the linux_amd64 archive. Pinning the
+  # hash as well as the tag means a re-published release cannot change what CI runs.
+  ACTIONLINT_SHA256: '023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757'
 
 jobs:
+  # A workflow that fails GitHub's schema validation is rejected at load time: the run
+  # reports a bare failure with zero jobs and no logs, and every check below silently
+  # stops running with nothing to say so. That has happened in this repository. The file
+  # is still valid YAML, so only a schema-aware linter catches it -- not review, and not
+  # any of the checks below.
+  workflows:
+    name: Workflow files are valid
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          file="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$file" \
+              "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${file}"
+          ( cd "$RUNNER_TEMP" && printf '%s  %s\n' "$ACTIONLINT_SHA256" "$file" | sha256sum --check --strict )
+          tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP" actionlint
+          chmod +x "$RUNNER_TEMP/actionlint"
+          "$RUNNER_TEMP/actionlint" --version
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          # No file arguments: actionlint discovers every workflow under
+          # .github/workflows, so a workflow added later is covered without
+          # anyone remembering to edit this job.
+          if ! "$RUNNER_TEMP/actionlint"; then
+              echo '::error::actionlint reported problems in .github/workflows.'
+              echo '::error::GitHub rejects a workflow that fails validation at load time, and then runs no jobs at all.'
+              exit 1
+          fi
+          echo 'actionlint: 0 findings.'
+
   # WinDSH.ps1 is generated from src/. This guards the one mistake that would ship a
   # build whose integrity hash is stale, which disables all remediation for every user.
   build:
