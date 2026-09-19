@@ -12,42 +12,71 @@ It is intended for helpdesk technicians, administrators, and non-technical users
 who need a clear view of which Windows Device Security features are available,
 enabled, disabled, unsupported, or require firmware configuration.
 
+WinDSH gives you a **security score out of 100**, an **HTML report** you can send to
+someone, a **plain-English explanation** of why any given protection is not running, and
+a **CIS Benchmark comparison** for Device Guard.
+
 **Contact:** windsh@rootauthority.com
 
 ---
 
-## Features
+## Quick start
 
-WinDSH audits and reports security capabilities including:
+Double-click **Run-WinDSH-AsAdmin.bat**. It requests Administrator rights and runs the
+audit. Keep it in the same folder as `WinDSH.ps1`.
 
-- TPM / Security Processor
-- Secure Boot
-- UEFI firmware status
-- CPU virtualization
-- Virtualization-Based Security (VBS)
-- Memory Integrity / HVCI
-- System Guard Secure Launch / Firmware Protection
-- Credential Guard
-- Kernel-mode Hardware-enforced Stack Protection
-- Kernel DMA Protection capability
-- DEP / NX
-- SMM security capabilities
-- Microsoft Vulnerable Driver Blocklist
-- Relevant Device Guard capabilities
-- Pending restart state
-- Virtual machine awareness
-- HVCI / Code Integrity driver-event diagnostics
+From PowerShell:
 
-WinDSH distinguishes between:
+```powershell
+.\WinDSH.ps1                       # interactive
+.\WinDSH.ps1 -AuditOnly            # report only, no changes
+.\WinDSH.ps1 -AuditOnly -HtmlReport
+.\WinDSH.ps1 -Explain hvci         # why is this not running?
+.\WinDSH.ps1 -ListControls         # what can this tool see and change?
+.\WinDSH.ps1 -EnableAllSafe -WhatIf   # preview, changes nothing
+.\WinDSH.ps1 -Revert               # undo the last change run
+```
 
-- supported
-- unsupported
-- enabled
-- configured
-- actually running
-- firmware action required
-- policy managed
-- reboot required
+---
+
+## What it checks
+
+| Control | Configurable | CIS |
+|---|---|---|
+| Virtualization-based Security | yes | 18.9.5.1 |
+| Platform Security Level (Secure Boot requirement) | yes | 18.9.5.2 |
+| Memory Integrity (HVCI) | yes | 18.9.5.3 |
+| Require UEFI Memory Attributes Table | yes | 18.9.5.4 |
+| Credential Guard | yes | 18.9.5.5 |
+| System Guard Secure Launch | yes | 18.9.5.6 |
+| Kernel-mode Hardware-enforced Stack Protection | yes | 18.9.5.7 |
+| Microsoft vulnerable driver blocklist | yes | - |
+| Hypervisor-enforced Paging Translation | report only | - |
+| SMM Firmware Measurement | report only | - |
+| Data Execution Prevention | report only | - |
+
+It also reports TPM, Secure Boot, UEFI mode, CPU virtualization, hypervisor launch type,
+Kernel DMA protection capability, pending restart state and virtual-machine context.
+
+WinDSH distinguishes between **supported, unsupported, configured, actually running,
+firmware action required, policy managed** and **reboot required** — because a feature
+that is configured but not running is the most common and most confusing case.
+
+---
+
+## Explaining failures
+
+The most useful thing WinDSH does is answer "why is this off, and what do I do?"
+
+- **Memory Integrity blocked?** It reads the Code Integrity event log for driver
+  compatibility warnings (Event ID 3087) and names the driver, with its publisher,
+  version and owning service.
+- **Secure Launch configured but not running?** It walks the dependency chain and tells
+  you whether it is a pending restart, a firmware setting, or DRTM hardware your machine
+  simply does not have.
+- **Something needs a BIOS change?** It gives the menu path for your manufacturer,
+  the other names the setting goes by, and warns you about BitLocker recovery keys
+  *before* you go near the TPM.
 
 ---
 
@@ -296,8 +325,46 @@ Authenticode signing is planned for stable releases.
 
 See [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
 
-Free code signing provided by [SignPath.io](https://signpath.io/),
-certificate by [SignPath Foundation](https://signpath.org/).
+WinDSH is **not currently code signed**. Releases are distributed unsigned and should
+be verified using the SHA-256 checksums published with each GitHub Release.
+
+An application to the SignPath Foundation OSS program was declined because the project
+does not yet meet their public-visibility threshold. Signing remains a goal and the
+release pipeline is already built to support it, but no signing sponsorship is in place
+and none should be inferred.
+
+---
+
+## Undoing changes
+
+Every value WinDSH writes is recorded in a change journal at
+`%ProgramData%\WinDSH\changes.jsonl` **before** the registry is touched, so a run can be
+undone even if it was interrupted.
+
+```powershell
+.\WinDSH.ps1 -Revert                 # undo the most recent change run
+.\WinDSH.ps1 -Revert -RunId <id>     # undo a specific run
+```
+
+A value that did not exist before a run is removed on revert, not set to zero.
+
+---
+
+## CIS Benchmark comparison
+
+WinDSH maps its controls to **CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0,
+section 18.9.5 (Device Guard)** and reports pass or fail for each.
+
+**Read this before using those results.** CIS audits the Group Policy hive
+(`HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard`). WinDSH configures local
+machine values under `HKLM\SYSTEM\CurrentControlSet\Control` and **never writes Group
+Policy**. A machine configured by WinDSH will have the protections running but will still
+report non-compliant against a CIS scan of 18.9.5. WinDSH states this plainly rather than
+implying compliance it does not deliver.
+
+Two deliberate differences from CIS are documented in the reports: WinDSH configures
+Memory Integrity and Credential Guard **without a UEFI lock**, so they can be reverted
+from Windows. CIS requires the locked form, which cannot be removed remotely.
 
 ---
 

@@ -1,27 +1,80 @@
-WinDSH v1.5.0 - Changes
-========================
+# WinDSH changelog
 
-Major additions
-- Added -WhatIf preview and interactive [P] Preview.
-- Added stable unattended/RMM exit-code contract.
-- Added -RMM compact JSON stdout mode.
-- Added JSON SchemaVersion 1.0.
-- Added InitialState/FinalState and richer outcomes to reports.
-- Added HVCI/Memory Integrity diagnostics from Code Integrity and Device Guard logs.
-- Enable All Safe now skips HVCI when recent Event ID 3087 compatibility evidence is present.
-- Added VM detection/informational guidance.
-- Added visible grayed UNAVAILABLE menu actions with reasons.
-- Added -Version and -SelfTest.
-- Refactored large system-state collection into focused collectors.
-- Added line-ending normalization to accidental-corruption integrity calculation.
-- Improved debug logging of provider exceptions.
-- Hardened PowerShell 5.1 collection/null handling.
-- Renamed helper functions to approved PowerShell verbs where applicable.
+## v2.0.0
 
-Behavior kept intentionally unchanged
-- No BitLocker/device-encryption management.
-- No rollback/revert yet (deferred to a later release).
-- No Authenticode signature yet (planned once code/interface mature).
-- Enable All Safe remains deliberately limited.
-- Launcher continues automatic Mark of the Web removal for WinDSH.ps1 only.
-- Temporary Process-scope RemoteSigned only; no persistent policy change or GPO bypass.
+Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new internals.
+
+### Added
+
+- **Security score out of 100** with a grade, weighted across the controls this machine
+  can actually run. Controls the hardware cannot support are excluded from the total
+  rather than counted as failures.
+- **HTML report** with the score, a per-control table, what to do next, the CIS
+  comparison and a Secured-core PC verdict. Self-contained: no external CSS, fonts,
+  scripts or images, so it renders offline and survives being emailed.
+- **Plain-text report** (`-TextReport`) and an interactive format chooser.
+- **CIS Benchmark mapping** for section 18.9.5, all seven controls, including two that
+  earlier versions never configured: Require UEFI Memory Attributes Table (18.9.5.4) and
+  Kernel-mode Hardware-enforced Stack Protection (18.9.5.7).
+- **Rollback.** Every change is journalled to `%ProgramData%\WinDSH\changes.jsonl` before
+  the registry is written, so `-Revert` works even after an interrupted run. A value that
+  did not previously exist is removed rather than set to zero.
+- **`-Explain <control>`** and a generic explainer that walks the dependency chain and
+  returns the single most actionable cause instead of a checklist.
+- **Driver identification.** Code Integrity Event ID 3087 warnings are resolved to a
+  publisher, version and owning service rather than a bare `.sys` filename.
+- **Detection-only controls**: Hypervisor-enforced Paging Translation, SMM Firmware
+  Measurement, and DEP. Reported but never configured, and carrying no scoring weight.
+- `-ListControls`, `-Advanced`, `-NoColor` (also honours `NO_COLOR`), and status markers
+  alongside colour so output is readable without it.
+
+### Changed
+
+- **Single source of truth.** All settings live in one declarative control catalog. Audit,
+  `-WhatIf`, apply, revert, scoring, CIS comparison and every report format are
+  projections over it. Previous versions restated the same registry facts in three places
+  and had a hand-written diagnostic per feature.
+- **Two-tier interactive menu**: five common actions, everything else behind "More
+  options". The previous menu had grown to fourteen entries.
+- **State collection split into static and volatile.** Hardware, firmware, TPM and OS
+  identity are collected once; only DeviceGuard state, registry values and restart status
+  are re-read after a change.
+- **The launcher no longer strips Mark of the Web.** It uses process-scope
+  `-ExecutionPolicy Bypass` instead. Stripping the mark permanently edited the file and
+  removed the "came from the internet" signal for every other program on the machine;
+  process-scope Bypass affects one child process and ends with it. No persistent execution
+  policy is changed either way.
+- **The launcher forwards no arguments** into the elevated process and now waits and
+  propagates the real exit code. It previously forwarded `%*` unfiltered and always
+  exited 0.
+- The script self-elevates, so it works when started from a non-elevated prompt.
+- Source is now modular under `src/`, built into the single distributable file by
+  `build/Build-WinDSH.ps1`, which also stamps the integrity hash so it cannot go stale.
+
+### Fixed
+
+- `RequirePlatformSecurityFeatures` was written as `1` unconditionally, silently weakening
+  a machine an administrator had set to `3` (Secure Boot + DMA protection). It is now
+  treated as a floor, so a stronger existing value is preserved.
+- Firmware mode was decided by substring-matching a display string that can read
+  `Legacy BIOS or unsupported UEFI` — which contains `UEFI`. Secure Launch prerequisites
+  were reported as met on non-UEFI machines. Decisions now use a normalised mode field.
+- `hypervisorlaunchtype=Off` blocks every VBS feature regardless of the registry and is
+  invisible there. It is now detected and reported as a blocker.
+- Pending restart was reported on nearly every machine, because the mere existence of
+  `PendingFileRenameOperations` was treated as evidence. Only Component Based Servicing
+  and Windows Update now set it.
+- Quitting after a read-only session ran a second full audit and prompted twice. It is now
+  immediate and silent when nothing changed.
+- Action results are no longer buried: each action waits for a keypress, and remediation
+  no longer reprints the whole audit over its own output.
+
+### Unchanged by design
+
+- No BitLocker or encryption management. BitLocker status is read only, to warn before
+  firmware changes.
+- No TPM clearing, no Secure Boot key changes, no antivirus modification, no policy bypass.
+- The Group Policy hive is never written. Policy-managed values are detected and left alone.
+- No network access, no encoded commands, no remote downloads.
+- The self-integrity check detects accidental corruption and is not a security boundary.
+- WinDSH is not code signed. See `CODE_SIGNING_POLICY.md`.
