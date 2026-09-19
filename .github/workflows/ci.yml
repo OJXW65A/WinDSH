@@ -154,6 +154,9 @@ jobs:
               Write-Host "::error::Audit returned unexpected exit code $code."
               exit 1
           }
+          # WinDSH's own non-zero-but-accepted exit code stays in $LASTEXITCODE and
+          # would fail the step regardless of the check above. Land on 0 explicitly.
+          exit 0
 
       - name: Validate the reports
         shell: powershell
@@ -188,6 +191,7 @@ jobs:
           }
           $obj = $lines[0] | ConvertFrom-Json
           Write-Host "RMM score: $($obj.score)"
+          exit 0
 
       - name: Preview mode writes nothing
         shell: powershell
@@ -201,3 +205,4 @@ jobs:
               exit 1
           }
           Write-Host '-WhatIf made no registry changes, as expected.'
+          exit 0
