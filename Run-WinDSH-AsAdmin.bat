@@ -8,10 +8,11 @@ REM
 REM  Double-click this file to run WinDSH. Windows opens a .ps1 in Notepad rather
 REM  than running it, so this launcher is how a non-technical user starts the tool.
 REM
-REM  It does three things and nothing else:
+REM  It does four things and nothing else:
 REM    1. Finds WinDSH.ps1 in this folder.
-REM    2. Asks Windows for Administrator rights (you will see a UAC prompt).
-REM    3. Runs the script and shows you the result.
+REM    2. Checks whether an organization policy blocks PowerShell scripts.
+REM    3. Asks Windows for Administrator rights (you will see a UAC prompt).
+REM    4. Runs the script and shows you the result.
 REM
 REM  It deliberately does NOT remove the Mark of the Web from WinDSH.ps1.
 REM  Earlier versions did. Stripping that mark permanently edits the file and
@@ -19,6 +20,10 @@ REM  removes the "this came from the internet" signal for every other program on
 REM  the computer, forever. Instead this launcher uses -ExecutionPolicy Bypass,
 REM  which applies to this one PowerShell process, ends when it ends, and leaves
 REM  the file untouched. No persistent execution policy is changed.
+REM
+REM  Process scope does NOT outrank Group Policy, so this cannot be used to work
+REM  around an organization policy. Where such a policy is set, the check below
+REM  says so in plain language instead of letting PowerShell fail cryptically.
 REM
 REM  It also does not forward command-line arguments into the elevated process.
 REM  For automation, call WinDSH.ps1 directly instead of using this launcher.
@@ -53,6 +58,13 @@ if not exist "%PSEXE%" (
     pause
     exit /b 1
 )
+
+REM --- Will an organization policy block this anyway? -------------------------
+REM  Group Policy outranks the process-scope -ExecutionPolicy used below. Detect
+REM  it here so the user gets an explanation rather than a raw PowerShell error,
+REM  and before being asked to approve a UAC prompt that could not have helped.
+"%PSEXE%" -NoLogo -NoProfile -Command "$mp=[string](Get-ExecutionPolicy -Scope MachinePolicy); $up=[string](Get-ExecutionPolicy -Scope UserPolicy); if([string]::IsNullOrWhiteSpace($mp)){$mp='Undefined'}; if([string]::IsNullOrWhiteSpace($up)){$up='Undefined'}; if($mp -ne 'Undefined'){$gp=$mp}elseif($up -ne 'Undefined'){$gp=$up}else{$gp='Undefined'}; if($gp -eq 'Restricted' -or $gp -eq 'AllSigned'){exit 20}; exit 0"
+if errorlevel 20 goto BLOCKED
 
 REM --- Are we already running with Administrator rights? ---------------------
 net session >nul 2>&1
@@ -98,3 +110,21 @@ echo   Exit code: %RC%
 echo.
 pause
 exit /b %RC%
+
+REM --- Blocked by organization policy ----------------------------------------
+:BLOCKED
+echo   PROBLEM: An organization policy prevents PowerShell scripts from running.
+echo.
+"%PSEXE%" -NoLogo -NoProfile -Command "Write-Host ('     MachinePolicy : ' + [string](Get-ExecutionPolicy -Scope MachinePolicy)); Write-Host ('     UserPolicy    : ' + [string](Get-ExecutionPolicy -Scope UserPolicy))"
+echo.
+echo   This policy is set by whoever administers this computer, and it outranks
+echo   the process-scope setting this launcher uses. WinDSH will NOT bypass or
+echo   change an organization policy.
+echo.
+echo   Ask your IT administrator to allow RemoteSigned scripts, or to provide a
+echo   signed WinDSH release.
+echo.
+echo   No Windows security setting and no execution policy was changed.
+echo.
+pause
+exit /b 20
