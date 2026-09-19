@@ -59,12 +59,16 @@ jobs:
           "version=$scriptVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag"              | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Verify integrity hash
+      - name: Verify the build is current
         shell: powershell
         run: |
-          .\tools\Update-IntegrityHash.ps1 -Check
+          # v2 generates WinDSH.ps1 from src/ and stamps the integrity hash during the
+          # build, so verifying the build is current also verifies the hash. This
+          # replaces tools\Update-IntegrityHash.ps1, which v1.5.0 used and v2 removed.
+          .\build\Build-WinDSH.ps1 -Check
           if ($LASTEXITCODE -ne 0) {
-              Write-Host '::error::Refusing to release with a stale integrity hash.'
+              Write-Host '::error::Refusing to release: WinDSH.ps1 is out of date with src/.'
+              Write-Host '::error::A stale build ships a wrong integrity hash, which disables all remediation.'
               exit 1
           }
 
