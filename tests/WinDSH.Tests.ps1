@@ -41,6 +41,28 @@ Describe 'Build freshness' {
         & $PowerShellExe -NoLogo -NoProfile -NonInteractive -File $BuildPath -Check | Out-Null
         $LASTEXITCODE | Should -Be 0 -Because 'run build\Build-WinDSH.ps1 and commit the result'
     }
+
+    It 'produces consistent CRLF line endings on any platform' {
+        # StringBuilder.AppendLine emits Environment.NewLine. When that was left
+        # unnormalised, a Windows build wrote CR CR LF, which the runtime integrity
+        # check reads as doubled lines -- a hash mismatch that disables all
+        # remediation. -Check could also never pass on Windows. Guard both here,
+        # because the damage only appears on the platform maintainers build on.
+        $temp = Join-Path ([IO.Path]::GetTempPath()) ('windsh-build-{0}.ps1' -f [Guid]::NewGuid())
+        try {
+            & $PowerShellExe -NoLogo -NoProfile -NonInteractive -File $BuildPath -OutputPath $temp | Out-Null
+            $LASTEXITCODE | Should -Be 0
+
+            $raw = [IO.File]::ReadAllText($temp)
+            $raw | Should -Not -Match "`r`r"
+            @([regex]::Matches($raw, "(?<!`r)`n")).Count |
+                Should -Be 0 -Because 'every LF must be part of a CRLF pair'
+
+            & $PowerShellExe -NoLogo -NoProfile -NonInteractive -File $BuildPath -Check -OutputPath $temp | Out-Null
+            $LASTEXITCODE | Should -Be 0 -Because '-Check must accept a file the build just wrote'
+        }
+        finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 Describe 'Source syntax' {

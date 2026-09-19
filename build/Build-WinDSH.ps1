@@ -48,7 +48,14 @@ foreach ($module in $modules) {
     $null = $sb.AppendLine($text.TrimEnd())
 }
 
-$built = $sb.ToString()
+# StringBuilder.AppendLine emits Environment.NewLine, which is CRLF on Windows and
+# LF elsewhere, so $built would otherwise mix LF inside a module with CRLF between
+# modules depending on who ran the build. Normalise once, here, so the hash, the
+# -Check comparison and the bytes written below are identical on every platform.
+# Without this, -Check can never pass on Windows, and a Windows build turns each
+# CRLF into CR CR LF, which the runtime integrity check reads as doubled lines --
+# a hash mismatch that disables all remediation for every user.
+$built = ($sb.ToString() -replace "`r`n", "`n") -replace "`r", "`n"
 
 # Compute the self-integrity hash exactly as Get-SelfIntegrity does at runtime.
 $pattern = '(?m)^\$script:ExpectedIntegrityHash\s*=\s*''[0-9A-Fa-f]{64}''\s*$'
