@@ -1,7 +1,17 @@
 # Code signing policy
 
-Free code signing provided by [SignPath.io](https://signpath.io/),
-certificate by [SignPath Foundation](https://signpath.org/).
+## Current status
+
+**WinDSH releases are not code signed.** There is no code signing certificate or signing
+sponsorship associated with this project at this time.
+
+An application to the SignPath Foundation open-source program was submitted and declined
+on public-visibility grounds. Nothing in this document should be read as a claim of
+sponsorship, endorsement, or affiliation with any signing provider.
+
+Until signing is in place, verify downloads using the `SHA256SUMS` file published with
+each GitHub Release. This document describes the policy that will apply **once** signing
+is established.
 
 ## Project
 
@@ -80,7 +90,7 @@ Signing credentials, API tokens, private keys, and signing-service credentials
 must never be stored in the source repository.
 
 Official release signatures must be produced through the project's approved
-SignPath signing workflow.
+signing workflow, whichever provider is used.
 
 The signing process must use artifacts originating from the official WinDSH
 repository and approved trusted build system.

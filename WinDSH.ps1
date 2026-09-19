@@ -1,582 +1,379 @@
 #requires -Version 5.1
 <#
 .SYNOPSIS
-    Audits and safely enables selected Windows Device Security protections.
+    WinDSH - Windows Device Security Helper. Audits and optionally configures
+    Windows platform security features, with CIS Benchmark mapping.
 
 .DESCRIPTION
-    WinDSH is designed for helpdesk technicians and non-technical
-    end users. It shows a plain-English summary first, then detailed technical
-    information. It uses only Windows built-in PowerShell, CIM/WMI and documented
-    registry interfaces.
+    WinDSH reports the real state of Virtualization-based Security, Memory Integrity
+    (HVCI), Credential Guard, System Guard Secure Launch, kernel shadow stacks and the
+    Microsoft vulnerable driver blocklist, explains why a feature is not running, and can
+    configure a conservative subset locally.
 
-    Safe/scriptable remediation:
-      - Virtualization-based Security (VBS) + Memory Integrity / HVCI
-      - System Guard Secure Launch / Firmware protection
+    Every setting lives in one declarative catalog. Audit, preview, apply, revert, scoring,
+    CIS comparison and all report formats are projections over that catalog, so they
+    cannot disagree with each other.
 
-    Advanced opt-in remediation:
-      - Credential Guard without UEFI lock (supported Windows editions only)
-      - Microsoft Vulnerable Driver Blocklist explicit local preference
+    WinDSH writes local machine configuration under
+    HKLM\SYSTEM\CurrentControlSet\Control. It NEVER writes the Group Policy hive
+    (HKLM\SOFTWARE\Policies) and refuses to change any value that policy manages.
 
-    Audit / guidance:
-      - UEFI vs Legacy firmware
-      - Secure Boot
-      - TPM / Security Processor
-      - CPU virtualization and SLAT
-      - Kernel DMA / Memory Access Protection capability
-      - DEP / NX
-      - SMM mitigations and measurement
-      - MBEC / GMET
-      - Kernel-mode Hardware-enforced Stack Protection
-      - Hypervisor-Enforced Paging Translation (HSPT)
-      - Device Guard policy ownership
-      - Pending restart indicators
-
-    This tool intentionally does NOT configure drive/device encryption.
-
-    v1.5.0 adds preview/WhatIf support, stable automation exit codes, compact RMM JSON,
-    JSON schema versioning, before/after reporting, VM awareness, HVCI driver/event
-    diagnostics, unsupported-action visibility, and internal collector refactoring.
-    Automatic Mark of the Web handling and temporary Process-scope RemoteSigned remain
-    launcher-only bootstrap behavior; organization Group Policy is never bypassed.
+    CIS NOTE: CIS Benchmark section 18.9.5 audits the Group Policy hive. Because WinDSH
+    configures local values instead, a machine configured by WinDSH will have the features
+    running but will NOT pass a CIS scan of 18.9.5. WinDSH reports that divergence
+    explicitly rather than implying compliance.
 
 .PARAMETER AuditOnly
-    Run an audit, make no security changes, save the selected report format, and exit.
+    Report only. Makes no changes. Cannot be combined with a remediation switch.
 
 .PARAMETER EnableAllSafe
-    Non-interactively enable the protections this tool considers suitable for generic
-    helpdesk remediation: Memory Integrity/HVCI and System Guard Secure Launch.
-    Firmware-controlled settings are never changed.
+    Unattended: apply the conservative recommended set.
 
-.PARAMETER EnableCredentialGuard
-    Explicitly enable Credential Guard without UEFI lock when the detected Windows
-    edition supports it. This is NOT included in EnableAllSafe because legacy
-    authentication/delegation compatibility should be tested first.
+.PARAMETER Enable
+    Unattended: apply specific controls by id (see -ListControls).
 
-.PARAMETER AutoReboot
-    After requested changes and report generation, automatically restart Windows if
-    this run made a change that requires reboot verification.
+.PARAMETER Revert
+    Undo a previous run. Use -RunId, or the most recent run when omitted.
 
-.PARAMETER ReportFormat
-    Text, Json, or None. In unattended mode the default is Text.
+.PARAMETER RunId
+    The change-journal run to revert.
+
+.PARAMETER ListControls
+    Print the control catalog and exit.
+
+.PARAMETER Explain
+    Explain one control by id and exit, e.g. -Explain secure-launch.
+
+.PARAMETER HtmlReport
+    Write an HTML report with a security score.
 
 .PARAMETER JsonReport
-    Convenience switch equivalent to -ReportFormat Json.
+    Write a machine-readable JSON report.
+
+.PARAMETER TextReport
+    Write a plain-text report.
 
 .PARAMETER NoReport
-    Convenience switch equivalent to -ReportFormat None.
+    Suppress report files.
 
 .PARAMETER ReportDirectory
-    Directory used for reports. Default: Desktop\WinDSH-Reports.
+    Where reports are written. Defaults to a WinDSH folder on the Desktop.
 
-.PARAMETER DebugLog
-    Enable detailed troubleshooting logging. The default log location is the current
-    user's Desktop when -DebugLogPath is not specified.
+.PARAMETER Rmm
+    Emit one compact JSON object on stdout. Implies unattended and no console output.
+
+.PARAMETER Advanced
+    Show full technical detail in the console instead of the plain-language summary.
+
+.PARAMETER NoColor
+    Disable colour. Also honours the NO_COLOR environment variable.
+
+.PARAMETER AutoReboot
+    Restart automatically when changes require it. Unattended only.
 
 .PARAMETER DebugLogPath
-    Optional full path for the debug log. Supplying this parameter also enables debug
-    logging. Default when debug logging is enabled: Desktop\WinDSH-Debug-<timestamp>.log.
-
-.PARAMETER Unattended
-    Do not show the interactive menu. With no enable switch, this performs an audit
-    and writes the selected report (Text by default).
-
-.PARAMETER RMM
-    Suppress normal console UI and emit exactly one compact JSON object to standard
-    output. No report file is created by default in RMM mode unless -JsonReport or
-    -ReportFormat is explicitly supplied. Run RMM mode from an already elevated context.
-
-.PARAMETER Version
-    Display the WinDSH version and exit without elevation or system changes.
+    Write a diagnostic log.
 
 .PARAMETER SelfTest
-    Run synthetic decision-logic regression checks and exit without changing Windows.
+    Run built-in synthetic tests and exit.
 
-.PARAMETER WhatIf
-    Native PowerShell preview mode. Use with -EnableAllSafe or -EnableCredentialGuard
-    to display/report the exact registry changes that would be requested without writing them.
-
-.EXAMPLE
-    .\WinDSH.ps1
-    Interactive audit/remediation.
-
-.EXAMPLE
-    .\WinDSH.ps1 -AuditOnly
-    Unattended audit with a plain-text report.
-
-.EXAMPLE
-    .\WinDSH.ps1 -EnableAllSafe -AutoReboot
-    Enable safe scriptable protections, write a text report, then reboot if required.
-
-.EXAMPLE
-    .\WinDSH.ps1 -EnableAllSafe -JsonReport
-    Enable safe scriptable protections, write JSON, and return 3010 if reboot is required.
-
-.EXAMPLE
-    .\WinDSH.ps1 -EnableCredentialGuard -ReportFormat Text
-    Explicitly enable Credential Guard without UEFI lock where supported.
-
-.EXAMPLE
-    .\WinDSH.ps1 -DebugLog
-    Run interactively and write detailed troubleshooting information to the current user's Desktop.
-
-.EXAMPLE
-    .\WinDSH.ps1 -AuditOnly -DebugLogPath C:\Temp\WinDSH-Debug.log
-    Run an unattended audit and write the diagnostic log to a specific path.
-
-.EXAMPLE
-    .\WinDSH.ps1 -EnableAllSafe -WhatIf
-    Preview the exact safe registry changes without modifying Windows.
-
-.EXAMPLE
-    .\WinDSH.ps1 -AuditOnly -RMM
-    Emit one compact JSON object to stdout and create no report file by default.
-
-.EXAMPLE
-    .\WinDSH.ps1 -Version
-    Print the tool version and exit.
+.PARAMETER Version
+    Print the version and exit.
 
 .NOTES
-    No ExecutionPolicy Bypass or persistent execution-policy change, encoded command, AV exclusion, Defender disabling,
-    remote download, TPM clear, Secure Boot key modification, UEFI lock, VBS Mandatory
-    mode, driver deletion, persistence, or scheduled task is used.
-
-    Microsoft documentation references:
-      https://learn.microsoft.com/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity
-      https://learn.microsoft.com/windows-hardware/design/device-experiences/oem-hvci-enablement
-      https://learn.microsoft.com/windows/security/hardware-security/system-guard-secure-launch-and-smm-protection
-      https://learn.microsoft.com/windows/security/hardware-security/kernel-dma-protection-for-thunderbolt
-      https://learn.microsoft.com/windows/security/identity-protection/credential-guard/
-      https://learn.microsoft.com/windows/security/identity-protection/credential-guard/configure
+    Exit codes:
+      0    success, no restart required
+      1    invalid usage or startup failure
+      2    audit or remediation completed with warnings
+      3    self-integrity check failed; remediation disabled
+      4    elevation required
+      5    revert failed
+      3010 success, restart required
 #>
-
-[CmdletBinding(SupportsShouldProcess=$true)]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [switch]$AuditOnly,
     [switch]$EnableAllSafe,
-    [switch]$EnableCredentialGuard,
-    [switch]$AutoReboot,
-    [ValidateSet('Text','Json','None')]
-    [string]$ReportFormat,
+    [string[]]$Enable,
+    [switch]$Revert,
+    [string]$RunId,
+    [switch]$ListControls,
+    [string]$Explain,
+    [switch]$HtmlReport,
     [switch]$JsonReport,
+    [switch]$TextReport,
     [switch]$NoReport,
     [string]$ReportDirectory,
-    [switch]$DebugLog,
+    [switch]$Rmm,
+    [switch]$Advanced,
+    [switch]$NoColor,
+    [switch]$AutoReboot,
     [string]$DebugLogPath,
-    [switch]$Unattended,
-    [switch]$RMM,
-    [switch]$Version,
     [switch]$SelfTest,
-    [Parameter(DontShow=$true)]
-    [switch]$PauseOnExit,
-    [Parameter(DontShow=$true)]
-    [switch]$ElevatedChild
+    [switch]$Version
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-# Get-ComputerInfo and some Windows providers can emit transient progress overlays
-# that visually cover the startup banner. WinDSH does not use progress output, so
-# suppress it for this script process only.
-$ProgressPreference = 'SilentlyContinue'
 
-$script:ToolName = 'WinDSH'
-$script:ToolVersion = '1.5.0'
-$script:ContactEmail = 'windsh@rootauthority.com'
-$script:SchemaVersion = '1.0'
-# This value protects against accidental corruption only. It is NOT a tamper-proof
-# security boundary because a deliberate editor can change both code and this value.
-$script:ExpectedIntegrityHash = '74c89f6ef21058ff0847d8f961147cc0daacce11fdfbfa8d11a4dc11807ddcff'
-$script:IntegrityState = $null
+$script:ToolName        = 'WinDSH'
+$script:ToolVersion     = '2.0.0'
+$script:SchemaVersion   = '2.0'
+$script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
+
+# Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
+$script:ExpectedIntegrityHash = 'e933d2fd5439ab243174f62446968c2ed937864d046f1b303761ed42aa7de7f9'
 $script:RemediationAllowed = $true
-$script:Changes = @()
-$script:RestartRecommended = $false
-$script:RestartReasons = @()
-$script:EffectiveReportFormat = $null
-$script:WasElevatedByTool = $false
-$script:DebugEnabled = $false
-$script:ResolvedDebugLogPath = $null
-$script:RmmMode = [bool]$RMM
-$script:PreviewRequested = [bool]$WhatIfPreference
-$script:InitialState = $null
-$script:FinalState = $null
-$script:LastHvciDiagnostics = $null
-$script:PlannedChanges = @()
-$script:LastReportPath = $null
-$script:LastExitCode = 0
-$script:Outcome = [ordered]@{
-    PolicyBlocked = $false
-    IntegrityFailed = $false
-    PrerequisiteUnavailable = $false
-    RemediationFailed = $false
-    UnsupportedSkipped = @()
-    PolicyReasons = @()
-    FailureReasons = @()
-    PrerequisiteReasons = @()
-}
-$script:InvocationBoundParameters = @{}
-foreach ($key in $PSBoundParameters.Keys) { $script:InvocationBoundParameters[$key] = $PSBoundParameters[$key] }
+$script:RestartRequired    = $false
+$script:Warnings           = @()
+$script:AppliedChanges     = @()
+$script:DebugEnabled       = $false
+$script:DebugPath          = $null
+$script:UseColor           = $true
+$script:ExitCode           = 0
+$script:Unattended         = $false
 
-function Test-IsAdministrator {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+function Initialize-Console {
+    param([bool]$DisableColor)
+    $script:UseColor = -not ($DisableColor -or $env:NO_COLOR -or $Rmm)
 }
 
-function ConvertTo-QuotedProcessArgument {
-    param([Parameter(Mandatory=$true)][string]$Value)
-    return ('"{0}"' -f ($Value -replace '"','\"'))
-}
-
-function Get-RelaunchArgumentString {
-    # Use a native PowerShell array for Windows PowerShell 5.1 compatibility.
-    $parts = @('-NoProfile','-File',(ConvertTo-QuotedProcessArgument $PSCommandPath))
-
-    if ($AuditOnly) { $parts += '-AuditOnly' }
-    if ($EnableAllSafe) { $parts += '-EnableAllSafe' }
-    if ($EnableCredentialGuard) { $parts += '-EnableCredentialGuard' }
-    if ($AutoReboot) { $parts += '-AutoReboot' }
-    if ($JsonReport) { $parts += '-JsonReport' }
-    if ($NoReport) { $parts += '-NoReport' }
-    if ($DebugLog) { $parts += '-DebugLog' }
-    if ($Unattended) { $parts += '-Unattended' }
-    if ($RMM) { $parts += '-RMM' }
-    if ($PauseOnExit) { $parts += '-PauseOnExit' }
-    if ($script:PreviewRequested) { $parts += '-WhatIf' }
-    $parts += '-ElevatedChild'
-    if ($script:InvocationBoundParameters.ContainsKey('ReportFormat')) {
-        $parts += '-ReportFormat'
-        $parts += (ConvertTo-QuotedProcessArgument $ReportFormat)
-    }
-    if ($script:InvocationBoundParameters.ContainsKey('ReportDirectory')) {
-        $parts += '-ReportDirectory'
-        $parts += (ConvertTo-QuotedProcessArgument $ReportDirectory)
-    }
-    if ($script:InvocationBoundParameters.ContainsKey('DebugLogPath')) {
-        $parts += '-DebugLogPath'
-        $parts += (ConvertTo-QuotedProcessArgument $DebugLogPath)
-    }
-    return ($parts -join ' ')
-}
-
-function Test-PauseOnExitApplicable {
-    if (-not $PauseOnExit) { return $false }
-
-    # Deployment/unattended switches must never wait for keyboard input.
-    $nonInteractiveRequested = ($AuditOnly -or $EnableAllSafe -or $EnableCredentialGuard -or $AutoReboot -or $JsonReport -or $NoReport -or $Unattended -or $RMM -or $Version -or $SelfTest -or $script:InvocationBoundParameters.ContainsKey('ReportFormat') -or $script:PreviewRequested)
-    return (-not $nonInteractiveRequested)
-}
-
-function Wait-BeforeWinDSHClose {
-    param([string]$Reason)
-
-    if (-not (Test-PauseOnExitApplicable)) { return }
-
-    Write-Host ''
-    Write-Host ('-' * 82) -ForegroundColor DarkGray
-    if (-not [string]::IsNullOrWhiteSpace($Reason)) {
-        Write-Host $Reason -ForegroundColor Cyan
-    }
-    Write-Host 'Review the information above before closing this window.' -ForegroundColor Gray
-    try {
-        [void](Read-Host 'Press Enter to close WinDSH')
-    }
-    catch {
-        # Read-Host can fail in unusual hosts. Keep the result visible briefly rather
-        # than turning a successful/error exit into another exception.
-        Start-Sleep -Seconds 10
-    }
-}
-
-function Exit-WinDSH {
+function Write-Line {
+    # Every status carries a text marker as well as colour, so the output is readable
+    # when colour is unavailable, redirected, or the reader cannot distinguish it.
     param(
-        [int]$Code = 0,
-        [string]$Reason,
-        [switch]$SkipPause
+        [string]$Text = '',
+        [ValidateSet('Plain', 'Good', 'Warn', 'Bad', 'Info', 'Head', 'Dim')]
+        [string]$Kind = 'Plain',
+        [int]$Indent = 0
     )
+    if ($Rmm) { return }
 
-    if (-not $SkipPause) { Wait-BeforeWinDSHClose -Reason $Reason }
-    exit $Code
+    $prefix = switch ($Kind) {
+        'Good' { '[ OK ] ' }
+        'Warn' { '[ !  ] ' }
+        'Bad'  { '[ X  ] ' }
+        'Info' { '[ i  ] ' }
+        default { '' }
+    }
+    $pad = ' ' * $Indent
+    $line = '{0}{1}{2}' -f $pad, $prefix, $Text
+
+    if (-not $script:UseColor) { Write-Host $line; return }
+
+    $colour = switch ($Kind) {
+        'Good' { 'Green' }
+        'Warn' { 'Yellow' }
+        'Bad'  { 'Red' }
+        'Info' { 'Cyan' }
+        'Head' { 'White' }
+        'Dim'  { 'DarkGray' }
+        default { 'Gray' }
+    }
+    Write-Host $line -ForegroundColor $colour
 }
 
-function Request-Elevation {
-    if (Test-IsAdministrator) { return }
-
-    if ($RMM) {
-        $obj = [ordered]@{
-            schemaVersion = $script:SchemaVersion
-            tool = $script:ToolName
-            version = $script:ToolVersion
-            exitCode = 1
-            status = 'AdministratorRequired'
-            message = 'RMM mode must be started from an already elevated PowerShell/process context; WinDSH did not request interactive UAC.'
-        }
-        [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 4))
-        exit 1
-    }
-
-    if ($ElevatedChild) {
-        Write-Host ''
-        Write-Host 'Administrator permission was requested, but the elevated process still does not have an Administrator token.' -ForegroundColor Red
-        Write-Host 'Ask your administrator/helpdesk to run this tool with an account that can approve the Windows UAC prompt.' -ForegroundColor Yellow
-        Exit-WinDSH -Code 1 -Reason 'WinDSH could not obtain Administrator access.'
-    }
-
-    if (-not $PSCommandPath) {
-        Write-Host 'This tool must be started from its .ps1 file.' -ForegroundColor Yellow
-        Exit-WinDSH -Code 1 -Reason 'WinDSH could not start from a valid script file.'
-    }
-
+function Write-Section {
+    param([string]$Title)
+    if ($Rmm) { return }
     Write-Host ''
-    Write-Host 'Windows Administrator permission is required.' -ForegroundColor Yellow
-    Write-Host 'A User Account Control (UAC) prompt will appear now. Choose Yes to continue.' -ForegroundColor Cyan
-
-    try {
-        $arguments = Get-RelaunchArgumentString
-        # -WhatIf previews WinDSH remediation, not the UAC bootstrap itself.
-        $savedWhatIfPreference = $WhatIfPreference
-        $WhatIfPreference = $false
-        try {
-            $child = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -PassThru -Wait
-        }
-        finally { $WhatIfPreference = $savedWhatIfPreference }
-        Exit-WinDSH -Code $child.ExitCode -SkipPause
-    }
-    catch {
-        Write-Host ''
-        Write-Host ('Administrator elevation was cancelled or failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
-        Write-Host 'No Device Security settings were changed.' -ForegroundColor Gray
-        Exit-WinDSH -Code 1 -Reason 'Administrator elevation was not completed.'
-    }
+    Write-Line ('== {0} ==' -f $Title) 'Head'
 }
 
-function Get-DefaultDebugLogPath {
-    $desktopPath = [Environment]::GetFolderPath('Desktop')
-    if ([string]::IsNullOrWhiteSpace($desktopPath)) { $desktopPath = Join-Path $env:USERPROFILE 'Desktop' }
-    if ([string]::IsNullOrWhiteSpace($desktopPath)) { $desktopPath = $env:TEMP }
-    return (Join-Path $desktopPath ('WinDSH-Debug-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
+function Add-Warning {
+    param([string]$Message)
+    $script:Warnings += $Message
+    Write-Debug-Log ('WARNING: {0}' -f $Message)
 }
 
-function Initialize-DebugLogging {
-    $script:DebugEnabled = [bool]($DebugLog -or $script:InvocationBoundParameters.ContainsKey('DebugLogPath'))
-    if (-not $script:DebugEnabled) { return }
-
-    if ($script:InvocationBoundParameters.ContainsKey('DebugLogPath') -and -not [string]::IsNullOrWhiteSpace($DebugLogPath)) {
-        $script:ResolvedDebugLogPath = [Environment]::ExpandEnvironmentVariables($DebugLogPath)
-    }
-    else {
-        $script:ResolvedDebugLogPath = Get-DefaultDebugLogPath
-    }
-
+function Write-Debug-Log {
+    param([string]$Message)
+    if (-not $script:DebugEnabled -or -not $script:DebugPath) { return }
     try {
-        $parent = Split-Path -Parent $script:ResolvedDebugLogPath
-        if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
-            New-Item -Path $parent -ItemType Directory -Force -WhatIf:$false | Out-Null
-        }
-        $header = @(
-            ('=' * 82),
-            ('{0} v{1} diagnostic log' -f $script:ToolName,$script:ToolVersion),
-            $script:ContactEmail,
-            ('Started: {0}' -f (Get-Date).ToString('s')),
-            ('Computer: {0}' -f $env:COMPUTERNAME),
-            ('User: {0}\\{1}' -f $env:USERDOMAIN,$env:USERNAME),
-            ('PowerShell: {0} ({1})' -f $PSVersionTable.PSVersion,$PSVersionTable.PSEdition),
-            ('64-bit process: {0}' -f [Environment]::Is64BitProcess),
-            ('Elevated: {0}' -f (Test-IsAdministrator)),
-            ('Script path: {0}' -f $PSCommandPath),
-            ('=' * 82),
-            ''
-        ) -join [Environment]::NewLine
-        [IO.File]::WriteAllText($script:ResolvedDebugLogPath,$header,(New-Object Text.UTF8Encoding($false)))
-        if (-not $script:RmmMode) { Write-Host ('Debug logging: {0}' -f $script:ResolvedDebugLogPath) -ForegroundColor DarkGray }
-    }
-    catch {
-        $script:DebugEnabled = $false
-        if (-not $script:RmmMode) { Write-Host ('WARNING: Debug log could not be created: {0}' -f $_.Exception.Message) -ForegroundColor Yellow }
-    }
-}
-
-function Write-DebugLog {
-    param([Parameter(Mandatory=$true)][string]$Message)
-    if (-not $script:DebugEnabled -or [string]::IsNullOrWhiteSpace($script:ResolvedDebugLogPath)) { return }
-    try {
-        $line = '[{0}] {1}{2}' -f (Get-Date -Format 'HH:mm:ss.fff'),$Message,[Environment]::NewLine
-        [IO.File]::AppendAllText($script:ResolvedDebugLogPath,$line,(New-Object Text.UTF8Encoding($false)))
+        $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
+        [IO.File]::AppendAllText($script:DebugPath, ('[{0}] {1}{2}' -f $stamp, $Message, "`n"))
     }
     catch { }
 }
 
-function Write-DebugException {
-    param(
-        [Parameter(Mandatory=$true)][string]$Stage,
-        [Parameter(Mandatory=$true)]$ErrorRecord
-    )
+function Write-DebugError {
+    param([string]$Stage, $ErrorRecord)
     if (-not $script:DebugEnabled) { return }
-    Write-DebugLog ('FAILED STAGE: {0}' -f $Stage)
-    Write-DebugLog ('Exception type: {0}' -f $ErrorRecord.Exception.GetType().FullName)
-    Write-DebugLog ('Message: {0}' -f $ErrorRecord.Exception.Message)
-    Write-DebugLog ('FullyQualifiedErrorId: {0}' -f $ErrorRecord.FullyQualifiedErrorId)
-    Write-DebugLog ('CategoryInfo: {0}' -f $ErrorRecord.CategoryInfo)
-    if ($ErrorRecord.InvocationInfo) {
-        Write-DebugLog ('Position: {0}' -f (($ErrorRecord.InvocationInfo.PositionMessage -replace '[\r\n]+',' | ').Trim()))
+    $message = if ($ErrorRecord -and $ErrorRecord.Exception) { $ErrorRecord.Exception.Message } else { 'unknown' }
+    Write-Debug-Log ('EXCEPTION during {0}: {1}' -f $Stage, $message)
+}
+
+# ---------------------------------------------------------------------------
+# Safe accessors. PowerShell 5.1 with StrictMode throws on missing members and
+# treats a single-item result as a scalar, which caused real defects in v1.
+# ---------------------------------------------------------------------------
+
+function Get-PropertySafe {
+    param($Object, [string]$Name, $Default = $null)
+    if ($null -eq $Object) { return $Default }
+    # Catalog value entries are hashtables, not PSObjects; PSObject.Properties does not
+    # see their keys, so check the hashtable first.
+    if ($Object -is [hashtable]) {
+        if ($Object.ContainsKey($Name) -and $null -ne $Object[$Name]) { return $Object[$Name] }
+        return $Default
     }
-    if (-not [string]::IsNullOrWhiteSpace($ErrorRecord.ScriptStackTrace)) {
-        Write-DebugLog ('ScriptStackTrace: {0}' -f ($ErrorRecord.ScriptStackTrace -replace '[\r\n]+',' | '))
+    try {
+        $member = $Object.PSObject.Properties[$Name]
+        if ($null -eq $member) { return $Default }
+        if ($null -eq $member.Value) { return $Default }
+        return $member.Value
+    }
+    catch { return $Default }
+}
+
+function ConvertTo-Array {
+    param($Value)
+    if ($null -eq $Value) { return @() }
+    return @($Value)
+}
+
+function Test-Contains {
+    param($Collection, $Value)
+    return [bool](@(ConvertTo-Array $Collection) -contains $Value)
+}
+
+function Format-Bool {
+    # Parameters are NOT named True/False/Null: those are automatic constants in
+    # PowerShell and binding to them fails at runtime with "cannot overwrite variable".
+    param($Value, [string]$TrueText = 'Yes', [string]$FalseText = 'No', [string]$UnknownText = 'Unknown')
+    if ($null -eq $Value) { return $UnknownText }
+    if ([bool]$Value) { return $TrueText }
+    return $FalseText
+}
+
+# ---------------------------------------------------------------------------
+# Registry access. Routed through a provider so the apply/revert engine can be
+# unit tested without a real HKLM.
+# ---------------------------------------------------------------------------
+
+function New-RegistryProvider {
+    return @{
+        Kind = 'Windows'
+        GetValue = {
+            param([string]$Path, [string]$Name)
+            try {
+                if (-not (Test-Path -LiteralPath $Path)) { return $null }
+                $item = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
+                return $item.$Name
+            }
+            catch { return $null }
+        }
+        ValueExists = {
+            param([string]$Path, [string]$Name)
+            try {
+                if (-not (Test-Path -LiteralPath $Path)) { return $false }
+                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+                return [bool](@($key.GetValueNames()) -contains $Name)
+            }
+            catch { return $false }
+        }
+        SetValue = {
+            param([string]$Path, [string]$Name, [string]$Type, $Value)
+            if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+            New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
+        }
+        RemoveValue = {
+            param([string]$Path, [string]$Name)
+            if (-not (Test-Path -LiteralPath $Path)) { return }
+            Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
-function Invoke-DebugStage {
-    param(
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][scriptblock]$ScriptBlock
-    )
-    Write-DebugLog ('BEGIN: {0}' -f $Name)
+function New-InMemoryRegistryProvider {
+    param([hashtable]$Seed)
+    $store = @{}
+    if ($Seed) { foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] } }
+
+    # GetNewClosure binds $store into each scriptblock; without it they resolve
+    # $store in the caller's scope at invocation time and fail.
+    return @{
+        Kind = 'InMemory'
+        Store = $store
+        GetValue = {
+            param([string]$Path, [string]$Name)
+            $key = '{0}|{1}' -f $Path, $Name
+            if ($store.ContainsKey($key)) { return $store[$key] }
+            return $null
+        }.GetNewClosure()
+        ValueExists = {
+            param([string]$Path, [string]$Name)
+            return $store.ContainsKey(('{0}|{1}' -f $Path, $Name))
+        }.GetNewClosure()
+        SetValue = {
+            param([string]$Path, [string]$Name, [string]$Type, $Value)
+            $store[('{0}|{1}' -f $Path, $Name)] = $Value
+        }.GetNewClosure()
+        RemoveValue = {
+            param([string]$Path, [string]$Name)
+            $key = '{0}|{1}' -f $Path, $Name
+            if ($store.ContainsKey($key)) { $store.Remove($key) }
+        }.GetNewClosure()
+    }
+}
+
+$script:Registry = New-RegistryProvider
+
+function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
+function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
+function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
+
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+
+function Test-IsElevated {
     try {
-        $result = & $ScriptBlock
-        Write-DebugLog ('END: {0} - SUCCESS' -f $Name)
-        return $result
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return [bool]$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     }
     catch {
-        Write-DebugException -Stage $Name -ErrorRecord $_
-        throw
+        Write-DebugError 'Check elevation' $_
+        return $false
     }
 }
 
-function Write-SystemStateDebugSnapshot {
-    param([Parameter(Mandatory=$true)]$State)
-    if (-not $script:DebugEnabled) { return }
-    try {
-        Write-DebugLog 'SYSTEM STATE SNAPSHOT:'
-        Write-DebugLog ('  Computer={0}; Windows={1}; Build={2}; Firmware={3}' -f $State.Computer.Name,$State.Computer.ProductName,$State.Computer.Build,$State.Firmware.Type)
-        Write-DebugLog ('  SecureBootSupported={0}; SecureBootEnabled={1}' -f $State.Firmware.SecureBootSupported,$State.Firmware.SecureBootEnabled)
-        Write-DebugLog ('  TPM Present={0}; Ready={1}; SpecVersion={2}' -f $State.TPM.Present,$State.TPM.Ready,$State.TPM.SpecVersion)
-        Write-DebugLog ('  Virtualization FirmwareEnabled={0}; HypervisorPresent={1}; SLAT={2}' -f $State.Virtualization.VirtualizationFirmwareEnabled,$State.Virtualization.HypervisorPresent,$State.Virtualization.SLAT)
-        Write-DebugLog ('  VBS StatusCode={0}; Status={1}' -f $State.VBS.StatusCode,$State.VBS.Status)
-        if ($State.DeviceGuardRaw) {
-            $a = $State.DeviceGuardRaw.AvailableSecurityProperties
-            $c = $State.DeviceGuardRaw.SecurityServicesConfigured
-            $r = $State.DeviceGuardRaw.SecurityServicesRunning
-            Write-DebugLog ('  DeviceGuard Available type={0}; values=[{1}]' -f $(if ($null -eq $a) {'<null>'} else {$a.GetType().FullName}),$(if ($null -eq $a) {''} else {($a -join ',')}))
-            Write-DebugLog ('  DeviceGuard Configured type={0}; values=[{1}]' -f $(if ($null -eq $c) {'<null>'} else {$c.GetType().FullName}),$(if ($null -eq $c) {''} else {($c -join ',')}))
-            Write-DebugLog ('  DeviceGuard Running type={0}; values=[{1}]' -f $(if ($null -eq $r) {'<null>'} else {$r.GetType().FullName}),$(if ($null -eq $r) {''} else {($r -join ',')}))
-        }
-        else {
-            Write-DebugLog '  DeviceGuard provider returned no object.'
-        }
-    }
-    catch {
-        Write-DebugException -Stage 'Write system-state debug snapshot' -ErrorRecord $_
-    }
-}
-
-function Get-SelfIntegrityResult {
-    $result = [ordered]@{
-        Status = 'Unknown'
-        ExpectedHash = $script:ExpectedIntegrityHash
-        ActualHash = $null
-        ScriptPath = $PSCommandPath
-        Note = 'Accidental-corruption check only; not a tamper-proof security boundary.'
-    }
-
-    try {
-        if ([string]::IsNullOrWhiteSpace($PSCommandPath) -or -not (Test-Path -LiteralPath $PSCommandPath)) {
-            $result.Status = 'Unavailable'
-            return [pscustomobject]$result
-        }
-        $source = [IO.File]::ReadAllText($PSCommandPath)
-        $placeholder = '0' * 64
-        $pattern = '(?m)^\$script:ExpectedIntegrityHash\s*=\s*''[0-9A-Fa-f]{64}''\s*$'
-        $normalizedLine = "`$script:ExpectedIntegrityHash = '$placeholder'"
-        $normalized = [regex]::Replace($source,$pattern,$normalizedLine,1)
-        if ($normalized -eq $source -and $script:ExpectedIntegrityHash -ne $placeholder) {
-            $result.Status = 'Unavailable'
-            $result.Note = 'Integrity marker was not found in the expected format.'
-            return [pscustomobject]$result
-        }
-
-        # This is an accidental-corruption check. Normalize line endings so an editor
-        # changing CRLF to LF (or vice versa) does not invalidate an otherwise identical file.
-        $normalized = $normalized -replace "`r`n", "`n"
-        $normalized = $normalized -replace "`r", "`n"
-
-        $sha = [Security.Cryptography.SHA256]::Create()
-        try {
-            $bytes = [Text.Encoding]::UTF8.GetBytes($normalized)
-            $actual = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()
-        }
-        finally { $sha.Dispose() }
-        $result.ActualHash = $actual
-        if ($actual -eq $script:ExpectedIntegrityHash.ToLowerInvariant()) { $result.Status = 'OK' }
-        else { $result.Status = 'FAILED' }
-    }
-    catch {
-        $result.Status = 'ERROR'
-        $result.Note = ('Integrity calculation failed: {0}' -f $_.Exception.Message)
-        Write-DebugException -Stage 'Self integrity check' -ErrorRecord $_
-    }
-    return [pscustomobject]$result
-}
-
-function Invoke-SelfIntegrityCheck {
-    $script:IntegrityState = Get-SelfIntegrityResult
-    Write-DebugLog ('Integrity status: {0}; expected={1}; actual={2}' -f $script:IntegrityState.Status,$script:IntegrityState.ExpectedHash,$script:IntegrityState.ActualHash)
-
-    if ($script:IntegrityState.Status -eq 'OK') { return $true }
-
-    $script:RemediationAllowed = $false
-    $script:Outcome.IntegrityFailed = $true
-    if (-not $script:RmmMode) {
-        Write-Host ''
-        Write-Host ('=' * 82) -ForegroundColor DarkGray
-        Write-Host ' Script integrity warning' -ForegroundColor Yellow
-        Write-Host ('=' * 82) -ForegroundColor DarkGray
-        Write-Host ('Integrity status: {0}' -f $script:IntegrityState.Status) -ForegroundColor Yellow
-        Write-Host ('The script does not match the expected {0} v{1} self-check value.' -f $script:ToolName,$script:ToolVersion) -ForegroundColor Yellow
-        Write-Host 'This check is intended to detect accidental corruption, incomplete copies, or unintended edits.' -ForegroundColor Gray
-        Write-Host 'Security-changing actions are disabled for this run; audit and debug logging remain available.' -ForegroundColor Gray
-        if ($script:IntegrityState.ActualHash) {
-            Write-Host ('Calculated normalized SHA-256: {0}' -f $script:IntegrityState.ActualHash) -ForegroundColor DarkGray
-        }
-    }
-    return $false
-}
-
-function Test-RemediationAllowed {
-    if ($script:RemediationAllowed) { return $true }
-    Write-Host 'Security changes are disabled because the self-integrity check did not pass.' -ForegroundColor Red
-    return $false
-}
-
-function Add-UniqueString {
+function Confirm-Action {
+    <#
+        Interactive confirmation. Returns $true without prompting when the run is
+        unattended, because a prompt on an RMM or scheduled run would hang forever
+        waiting for a user who is not there. Consent for those runs comes from the
+        invocation itself.
+    #>
     param(
-        [Parameter(Mandatory=$true)][AllowEmptyCollection()][object[]]$Array,
-        [Parameter(Mandatory=$true)][string]$Value
+        [Parameter(Mandatory = $true)][string]$Question,
+        [switch]$DefaultYes,
+        [string]$RequireTyped
     )
-    if ([string]::IsNullOrWhiteSpace($Value)) { return @($Array) }
-    $result = @($Array)
-    if (-not ($result -contains $Value)) { $result += $Value }
-    return $result
-}
 
-function Set-OutcomeIssue {
-    param(
-        [ValidateSet('Policy','Prerequisite','Failure','Unsupported')][string]$Type,
-        [Parameter(Mandatory=$true)][string]$Reason
-    )
-    switch ($Type) {
-        'Policy' {
-            $script:Outcome.PolicyBlocked = $true
-            $script:Outcome.PolicyReasons = @(Add-UniqueString -Array @($script:Outcome.PolicyReasons) -Value $Reason)
-        }
-        'Prerequisite' {
-            $script:Outcome.PrerequisiteUnavailable = $true
-            $script:Outcome.PrerequisiteReasons = @(Add-UniqueString -Array @($script:Outcome.PrerequisiteReasons) -Value $Reason)
-        }
-        'Failure' {
-            $script:Outcome.RemediationFailed = $true
-            $script:Outcome.FailureReasons = @(Add-UniqueString -Array @($script:Outcome.FailureReasons) -Value $Reason)
-        }
-        'Unsupported' {
-            $script:Outcome.UnsupportedSkipped = @(Add-UniqueString -Array @($script:Outcome.UnsupportedSkipped) -Value $Reason)
+    if ($script:Unattended) { return $true }
+
+    if ($RequireTyped) {
+        Write-Line ('Type {0} to continue, or anything else to cancel.' -f $RequireTyped) 'Warn'
+        $typed = Read-Host $Question
+        return [bool]($typed.Trim() -eq $RequireTyped)
+    }
+
+    $suffix = if ($DefaultYes) { '[Y/n]' } else { '[y/N]' }
+    while ($true) {
+        $answer = Read-Host ('{0} {1}' -f $Question, $suffix)
+        if ([string]::IsNullOrWhiteSpace($answer)) { return [bool]$DefaultYes }
+        switch ($answer.Trim().ToUpperInvariant()) {
+            'Y' { return $true }
+            'YES' { return $true }
+            'N' { return $false }
+            'NO' { return $false }
+            default { Write-Line 'Please answer yes or no.' 'Warn' }
         }
     }
 }
@@ -584,2209 +381,3317 @@ function Set-OutcomeIssue {
 function Get-ExitCodeMeaning {
     param([int]$Code)
     switch ($Code) {
-        0 { 'Success; no WinDSH-requested restart is required.' }
-        1 { 'Fatal/internal error or required Administrator context was unavailable.' }
-        2 { 'Requested remediation was blocked by organization-managed policy.' }
-        3 { 'WinDSH self-integrity check failed; remediation is blocked and the file should be replaced with an intact copy.' }
-        4 { 'An explicitly requested remediation is unavailable because a required prerequisite is missing.' }
-        5 { 'One or more requested remediation actions failed or could not complete safely.' }
-        3010 { 'Success; a Windows restart is required/recommended to complete verification.' }
-        default { 'Unknown WinDSH exit code.' }
+        0    { 'Completed successfully. No restart needed.' }
+        1    { 'Could not start: the options given were not valid.' }
+        2    { 'Completed, but with warnings.' }
+        3    { 'The file failed its integrity check, so changes were disabled.' }
+        4    { 'Administrator rights were required but not available.' }
+        5    { 'The undo operation failed.' }
+        3010 { 'Completed. Windows must restart for the changes to take effect.' }
+        default { 'Unrecognised exit code {0}.' -f $Code }
     }
 }
 
-function Resolve-InvocationMode {
-    if ($AuditOnly -and ($EnableAllSafe -or $EnableCredentialGuard)) {
-        throw '-AuditOnly cannot be combined with an enable/remediation switch.'
-    }
-    if ($JsonReport -and $NoReport) {
-        throw '-JsonReport and -NoReport cannot be used together.'
-    }
-    if ($JsonReport -and $script:InvocationBoundParameters.ContainsKey('ReportFormat') -and $ReportFormat -ne 'Json') {
-        throw '-JsonReport conflicts with the specified -ReportFormat.'
-    }
-    if ($NoReport -and $script:InvocationBoundParameters.ContainsKey('ReportFormat') -and $ReportFormat -ne 'None') {
-        throw '-NoReport conflicts with the specified -ReportFormat.'
-    }
-    if ($script:PreviewRequested -and -not ($EnableAllSafe -or $EnableCredentialGuard)) {
-        throw '-WhatIf must be combined with -EnableAllSafe or -EnableCredentialGuard. Interactive users can press P to preview recommended changes.'
-    }
+function Get-RelaunchArgumentList {
+    <#
+        Rebuilds the invocation from bound parameters instead of concatenating a raw
+        command line. v1's launcher forwarded %* unfiltered into the elevated process,
+        which let a caller steer parameters of a process running with higher privilege.
+        Each value is quoted and internal quotes doubled, so a value can never become
+        a new argument.
+    #>
+    param([hashtable]$Bound)
 
-    $explicitReportRequest = ($JsonReport -or $NoReport -or $script:InvocationBoundParameters.ContainsKey('ReportFormat'))
-    if ($NoReport) {
-        $script:EffectiveReportFormat = 'None'
+    # NOT named $args: that is an automatic variable in PowerShell.
+    $list = @()
+    foreach ($key in $Bound.Keys) {
+        $value = $Bound[$key]
+        if ($value -is [switch]) {
+            if ($value.IsPresent) { $list += ('-{0}' -f $key) }
+        }
+        elseif ($value -is [array]) {
+            $list += ('-{0}' -f $key)
+            foreach ($v in $value) { $list += ('"{0}"' -f ([string]$v -replace '"', '""')) }
+        }
+        elseif ($null -ne $value) {
+            $list += ('-{0}' -f $key)
+            $list += ('"{0}"' -f ([string]$value -replace '"', '""'))
+        }
     }
-    elseif ($JsonReport) {
-        $script:EffectiveReportFormat = 'Json'
-    }
-    elseif ($script:InvocationBoundParameters.ContainsKey('ReportFormat')) {
-        $script:EffectiveReportFormat = $ReportFormat
-    }
-    elseif ($RMM) {
-        # RMM stdout is the report by default. A file is created only when explicitly requested.
-        $script:EffectiveReportFormat = 'None'
-    }
-
-    $nonInteractiveRequested = ($AuditOnly -or $EnableAllSafe -or $EnableCredentialGuard -or $AutoReboot -or $JsonReport -or $NoReport -or $Unattended -or $RMM -or $script:InvocationBoundParameters.ContainsKey('ReportFormat') -or $script:PreviewRequested)
-
-    # -EnableAllSafe automatically creates a plain-text report unless the caller explicitly
-    # chose another report mode. Other unattended modes retain Text as the normal default.
-    if ($nonInteractiveRequested -and -not $script:EffectiveReportFormat) {
-        $script:EffectiveReportFormat = 'Text'
-    }
-    if ($RMM -and -not $explicitReportRequest) {
-        $script:EffectiveReportFormat = 'None'
-    }
-
-    return [bool]$nonInteractiveRequested
+    return $list
 }
 
-function Get-DefaultReportDirectory {
-    $desktopPath = [Environment]::GetFolderPath('Desktop')
-    if ([string]::IsNullOrWhiteSpace($desktopPath)) {
-        $desktopPath = Join-Path $env:USERPROFILE 'Desktop'
-    }
-    if ([string]::IsNullOrWhiteSpace($desktopPath)) {
-        $desktopPath = $env:TEMP
-    }
-    return (Join-Path $desktopPath 'WinDSH-Reports')
-}
+function Request-Elevation {
+    <#
+        Relaunches this script elevated and waits, so the exit code still reaches the
+        caller. Returns $false when elevation is impossible or declined.
 
-function Get-ReportRoot {
-    if (-not [string]::IsNullOrWhiteSpace($ReportDirectory)) {
-        return [Environment]::ExpandEnvironmentVariables($ReportDirectory)
-    }
-    return Get-DefaultReportDirectory
-}
+        Never attempted in RMM mode: a UAC prompt on an unattended run would hang the
+        agent waiting for a user who is not there.
+    #>
+    param([hashtable]$Bound)
 
-function Initialize-ReportFolder {
-    $root = Get-ReportRoot
-    if (-not (Test-Path -LiteralPath $root)) {
-        New-Item -Path $root -ItemType Directory -Force -WhatIf:$false | Out-Null
-    }
-    return $root
-}
+    if ($Rmm) { return $false }
 
-function Write-Section {
-    param([Parameter(Mandatory=$true)][string]$Title)
-    Write-Host ''
-    Write-Host ('=' * 82) -ForegroundColor DarkGray
-    Write-Host (' {0}' -f $Title) -ForegroundColor Cyan
-    Write-Host ('=' * 82) -ForegroundColor DarkGray
-}
-
-function Write-SubSection {
-    param([Parameter(Mandatory=$true)][string]$Title)
-    Write-Host ''
-    Write-Host $Title -ForegroundColor White
-    Write-Host ('-' * 82) -ForegroundColor DarkGray
-}
-
-function Write-StatusLine {
-    param(
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][AllowNull()][AllowEmptyString()]$Value,
-        [ValidateSet('Good','Warn','Bad','Info')][string]$Kind = 'Info'
-    )
-    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
-        $Value = 'Not reported'
-    }
-    else {
-        $Value = [string]$Value
-    }
-    $color = switch ($Kind) {
-        'Good' { 'Green' }
-        'Warn' { 'Yellow' }
-        'Bad'  { 'Red' }
-        default { 'Gray' }
-    }
-    Write-Host ('{0,-45} {1}' -f $Name, $Value) -ForegroundColor $color
-}
-
-function Write-SummaryItem {
-    param(
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][string]$Status,
-        [ValidateSet('Good','Warn','Bad','Info','Unavailable')][string]$Kind = 'Info',
-        [string]$NextStep
-    )
-    $tag = switch ($Kind) {
-        'Good' { '[OK]' }
-        'Warn' { '[ACTION]' }
-        'Bad'  { '[PROBLEM]' }
-        'Unavailable' { '[N/A]' }
-        default { '[INFO]' }
-    }
-    $color = switch ($Kind) {
-        'Good' { 'Green' }
-        'Warn' { 'Yellow' }
-        'Bad'  { 'Red' }
-        'Unavailable' { 'DarkGray' }
-        default { 'Gray' }
-    }
-    Write-Host ('{0,-10} {1,-34} {2}' -f $tag,$Name,$Status) -ForegroundColor $color
-    if (-not [string]::IsNullOrWhiteSpace($NextStep)) {
-        Write-Host ('           Next: {0}' -f $NextStep) -ForegroundColor DarkGray
-    }
-}
-
-function Get-ObjectPropertySafe {
-    param(
-        [Parameter(Mandatory=$true)]$Object,
-        [Parameter(Mandatory=$true)][string]$Name,
-        $Default = $null
-    )
-    if ($null -eq $Object) { return $Default }
-    $prop = $Object.PSObject.Properties[$Name]
-    if ($null -eq $prop) { return $Default }
-    return $prop.Value
-}
-
-function Get-RegistryValueSafe {
-    param(
-        [Parameter(Mandatory=$true)][string]$Path,
-        [Parameter(Mandatory=$true)][string]$Name
-    )
+    $host_ = $null
     try {
-        if (-not (Test-Path -LiteralPath $Path)) { return $null }
-        $item = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
-        return $item.$Name
+        if ($PSVersionTable.PSEdition -eq 'Core') { $host_ = (Get-Process -Id $PID).Path }
+    }
+    catch { Write-DebugError 'Resolve current host path' $_ }
+    if ([string]::IsNullOrWhiteSpace($host_)) {
+        $host_ = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    }
+    if (-not (Test-Path -LiteralPath $host_)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { return $false }
+
+    Write-Line 'WinDSH needs Administrator rights to read device security settings.' 'Info'
+    Write-Line 'You will see a User Account Control prompt.' 'Info'
+
+    # Process-scope Bypass only. This affects this one child process and ends with it;
+    # it does not change any persistent execution policy.
+    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    $list += Get-RelaunchArgumentList -Bound $Bound
+
+    try {
+        $proc = Start-Process -FilePath $host_ -ArgumentList $list -Verb RunAs -PassThru -Wait -WhatIf:$false
+        $script:ExitCode = [int]$proc.ExitCode
+        return $true
     }
     catch {
-        Write-DebugException -Stage ('Read registry value {0}\\{1}' -f $Path,$Name) -ErrorRecord $_
-        return $null
+        Write-DebugError 'Request elevation' $_
+        Write-Line 'Elevation was cancelled or refused.' 'Warn'
+        return $false
     }
 }
 
-function Set-DwordValue {
-    param(
-        [Parameter(Mandatory=$true)][string]$Path,
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][int]$Value
-    )
-    if (-not (Test-Path -LiteralPath $Path)) {
-        New-Item -Path $Path -Force | Out-Null
-    }
-    New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType DWord -Value $Value -Force | Out-Null
-}
-
-function Test-ArrayContains {
-    param($Array, [int]$Value)
-    if ($null -eq $Array) { return $false }
-    return (@($Array) -contains $Value)
-}
-
-function ConvertTo-DGStatusText {
-    param([Nullable[int]]$Value)
-    if ($null -eq $Value) { return 'Unknown / provider unavailable' }
-    switch ([int]$Value) {
-        0 { 'Disabled' }
-        1 { 'Configured, not running' }
-        2 { 'Running' }
-        default { 'Unknown ({0})' -f $Value }
-    }
-}
-
-function Add-Change {
-    param(
-        [string]$Feature,
-        [string]$Action,
-        [string]$Before,
-        [string]$After,
-        [string]$Result
-    )
-    $script:Changes += [pscustomobject]@{
-        Time = (Get-Date).ToString('s')
-        Feature = $Feature
-        Action = $Action
-        Before = $Before
-        After = $After
-        Result = $Result
-    }
-}
-
-function Set-RestartRecommended {
-    param([Parameter(Mandatory=$true)][string]$Reason)
-    $script:RestartRecommended = $true
-    if (-not ($script:RestartReasons -contains $Reason)) {
-        $script:RestartReasons += $Reason
-    }
-}
-
-function Get-PendingRestartState {
-    $cbs = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
-    $wu = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-    $pendingRename = $false
+function Get-SelfIntegrity {
+    <#
+        SHA-256 of this file with the stored hash line replaced by a placeholder and line
+        endings normalized. Detects accidental corruption in transit. It is NOT a security
+        boundary: anyone who can edit the script can recompute the value.
+    #>
+    $result = [pscustomobject]@{ Status = 'Unknown'; Expected = $script:ExpectedIntegrityHash; Actual = $null; Path = $null }
     try {
-        $value = Get-RegistryValueSafe -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations'
-        $pendingRename = ($null -ne $value)
-    }
-    catch { Write-DebugException -Stage 'Pending restart: PendingFileRenameOperations' -ErrorRecord $_ }
-    return [pscustomobject]@{
-        Pending = [bool]($cbs -or $wu -or $pendingRename)
-        ComponentBasedServicing = [bool]$cbs
-        WindowsUpdate = [bool]$wu
-        PendingFileRenameOperations = [bool]$pendingRename
-    }
-}
+        $path = $PSCommandPath
+        if ([string]::IsNullOrWhiteSpace($path)) { $result.Status = 'Skipped'; return $result }
+        $result.Path = $path
 
-function Get-DeviceGuardState {
-    try {
-        return Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' -ClassName 'Win32_DeviceGuard' -ErrorAction Stop
+        $text = [IO.File]::ReadAllText($path)
+        $pattern = '(?m)^\$script:ExpectedIntegrityHash\s*=\s*''[0-9A-Fa-f]{64}''\s*$'
+        if (-not [regex]::IsMatch($text, $pattern)) { $result.Status = 'Skipped'; return $result }
+
+        $normalized = [regex]::Replace($text, $pattern, ("`$script:ExpectedIntegrityHash = '{0}'" -f ('0' * 64)), 1)
+        $normalized = ($normalized -replace "`r`n", "`n") -replace "`r", "`n"
+
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($normalized)
+            $result.Actual = ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $sha.Dispose() }
+
+        if ($script:ExpectedIntegrityHash -eq ('0' * 64)) { $result.Status = 'Unsigned' }
+        elseif ($result.Actual -eq $script:ExpectedIntegrityHash.ToLowerInvariant()) { $result.Status = 'OK' }
+        else { $result.Status = 'Failed' }
     }
     catch {
-        Write-DebugException -Stage 'Query Win32_DeviceGuard' -ErrorRecord $_
-        return $null
+        Write-DebugError 'Self-integrity check' $_
+        $result.Status = 'Error'
     }
+    return $result
 }
 
-function Test-CredentialGuardEditionSupport {
-    param([string]$EditionID)
-    if ([string]::IsNullOrWhiteSpace($EditionID)) { return $false }
-    return [bool]($EditionID -match 'Enterprise|Education')
+# ===== 20-catalog.ps1 =====
+# ---------------------------------------------------------------------------
+# Control catalog: the single source of truth.
+#
+# Audit, explain, preview, apply, revert, scoring, CIS comparison and every report
+# format are projections over this table. Adding a control means adding one entry.
+#
+# LocalValues  - what WinDSH writes, under HKLM\SYSTEM\CurrentControlSet\Control
+# PolicyValues - what CIS audits, under HKLM\SOFTWARE\Policies (READ ONLY, never written)
+#
+# Comparison semantics for a value:
+#   Exact   - rewrite anything that differs (default)
+#   AtLeast - the declared value is a floor; a stronger existing value is preserved
+# ---------------------------------------------------------------------------
+
+$script:RegDeviceGuard   = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
+$script:RegHvci          = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity'
+$script:RegSystemGuard   = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\SystemGuard'
+$script:RegShadowStacks  = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\KernelShadowStacks'
+$script:RegLsa           = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
+$script:RegCiConfig      = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'
+$script:RegPolicyDG      = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard'
+
+$script:ControlCatalog = @(
+
+    [pscustomobject]@{
+        Id          = 'vbs'
+        Name        = 'Virtualization-based Security'
+        PlainName   = 'Core security container'
+        Category    = 'Platform'
+        Weight      = 25
+        RiskLevel   = 'Low'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @()
+        Summary     = 'Uses the Windows hypervisor to create a protected area of memory that the rest of Windows cannot reach.'
+        Why         = 'Everything else on this list runs inside it. Without it, none of the other protections can start.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity'
+        DetectKey   = 'Vbs'
+        LocalValues = @(
+            @{ Path = $script:RegDeviceGuard; Name = 'EnableVirtualizationBasedSecurity'; Type = 'DWord'; Value = 1
+               Note = 'Turns VBS on.' }
+            @{ Path = $script:RegDeviceGuard; Name = 'Locked'; Type = 'DWord'; Value = 0
+               Note = 'No UEFI lock, so the change can be undone from Windows.' }
+        )
+        PolicyValues = @(
+            @{ Name = 'EnableVirtualizationBasedSecurity'; Expected = 1 }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.1'; Profile = 'L1'
+            Title = "Ensure 'Turn On Virtualization Based Security' is set to 'Enabled'"
+            Expected = 'EnableVirtualizationBasedSecurity = 1 (Group Policy hive)'
+        }
+    }
+
+    [pscustomobject]@{
+        Id          = 'platform-security'
+        Name        = 'Platform Security Level'
+        PlainName   = 'Secure Boot requirement'
+        Category    = 'Platform'
+        Weight      = 10
+        RiskLevel   = 'Low'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @('vbs')
+        Summary     = 'Requires Secure Boot before the security container is allowed to start.'
+        Why         = 'Stops the protection being started on a machine whose boot chain has not been verified.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity'
+        DetectKey   = 'PlatformSecurity'
+        LocalValues = @(
+            # 1 = Secure Boot only, 3 = Secure Boot and DMA protection. CIS accepts either,
+            # so 1 is a floor rather than a target: an administrator who chose 3 keeps it.
+            # Note 3 is stricter, not simply better - on hardware without an IOMMU it
+            # prevents VBS from starting at all.
+            @{ Path = $script:RegDeviceGuard; Name = 'RequirePlatformSecurityFeatures'; Type = 'DWord'; Value = 1
+               Comparison = 'AtLeast'
+               Note = 'Secure Boot required. An existing value of 3 (Secure Boot + DMA) is preserved.' }
+        )
+        PolicyValues = @(
+            @{ Name = 'RequirePlatformSecurityFeatures'; Expected = 1; AlsoAccepted = @(3) }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.2'; Profile = 'L1'
+            Title = "Ensure 'Select Platform Security Level' is set to 'Secure Boot' or higher"
+            Expected = 'RequirePlatformSecurityFeatures = 1 or 3 (Group Policy hive)'
+        }
+    }
+
+    [pscustomobject]@{
+        Id          = 'hvci'
+        Name        = 'Memory Integrity (HVCI)'
+        PlainName   = 'Driver protection'
+        Category    = 'Kernel'
+        Weight      = 25
+        RiskLevel   = 'Medium'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @('vbs', 'platform-security')
+        Summary     = 'Checks every driver inside the protected container before Windows will load it.'
+        Why         = 'Blocks malicious or tampered drivers from running with kernel privileges.'
+        Caution     = 'An incompatible driver can stop the computer from starting normally. WinDSH checks recent compatibility warnings before offering this.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity'
+        DetectKey   = 'Hvci'
+        # Windows logs Event ID 3087 in CodeIntegrity/Operational when a driver is not
+        # compatible with Memory Integrity. Enabling HVCI anyway can stop the machine
+        # booting cleanly, so recent evidence blocks the safe set. Declared here rather
+        # than special-cased inside the apply path, so any control can have one.
+        Preflight   = @{
+            Kind = 'CodeIntegrityEvents'
+            EventIds = @(3087)
+            LookbackDays = 14
+            BlocksSafeSet = $true
+            Message = 'Windows has recently reported a driver that is not compatible with Memory Integrity. Enabling it now could stop this computer starting normally.'
+        }
+        LocalValues = @(
+            @{ Path = $script:RegHvci; Name = 'Enabled'; Type = 'DWord'; Value = 1; Note = 'Turns Memory Integrity on.' }
+            @{ Path = $script:RegHvci; Name = 'Locked'; Type = 'DWord'; Value = 0; Note = 'No UEFI lock, so it stays revertible.' }
+        )
+        PolicyValues = @(
+            # CIS wants 1 = Enabled with UEFI lock. WinDSH deliberately configures the
+            # unlocked form locally so a machine that will not boot can be recovered.
+            @{ Name = 'HypervisorEnforcedCodeIntegrity'; Expected = 1 }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.3'; Profile = 'L1'
+            Title = "Ensure 'Virtualization Based Protection of Code Integrity' is set to 'Enabled with UEFI lock'"
+            Expected = 'HypervisorEnforcedCodeIntegrity = 1, with UEFI lock (Group Policy hive)'
+            Divergence = 'WinDSH configures Memory Integrity WITHOUT a UEFI lock so it can be reverted from Windows. CIS requires the locked form, which can only be removed with a physically present user.'
+        }
+    }
+
+    [pscustomobject]@{
+        Id          = 'hvci-mat'
+        Name        = 'Require UEFI Memory Attributes Table'
+        PlainName   = 'Firmware compatibility check'
+        Category    = 'Kernel'
+        Weight      = 5
+        RiskLevel   = 'Low'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @('vbs')
+        Summary     = 'Only allows driver protection to start on firmware that reports a UEFI Memory Attributes Table.'
+        Why         = 'A safety setting. Firmware without this table can be incompatible with Memory Integrity, which CIS notes may lead to crashes, data loss, or plug-in card incompatibility.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity'
+        DetectKey   = 'HvciMat'
+        LocalValues = @(
+            @{ Path = $script:RegDeviceGuard; Name = 'HVCIMATRequired'; Type = 'DWord'; Value = 1
+               Note = 'Refuses to start Memory Integrity on firmware that cannot support it safely.' }
+        )
+        PolicyValues = @(
+            @{ Name = 'HVCIMATRequired'; Expected = 1 }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.4'; Profile = 'L1'
+            Title = "Ensure 'Require UEFI Memory Attributes Table' is set to 'True (checked)'"
+            Expected = 'HVCIMATRequired = 1 (Group Policy hive)'
+        }
+    }
+
+    [pscustomobject]@{
+        Id          = 'credential-guard'
+        Name        = 'Credential Guard'
+        PlainName   = 'Password and sign-in protection'
+        Category    = 'Credentials'
+        Weight      = 20
+        RiskLevel   = 'Medium'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @('vbs', 'platform-security')
+        Summary     = 'Moves your saved sign-in secrets into the protected container so malware on the computer cannot read them.'
+        Why         = 'Defeats credential-theft tools that scrape passwords and Kerberos tickets from memory.'
+        Caution     = 'Can break older network sign-in methods, some VPN clients, and legacy NTLM delegation.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/'
+        DetectKey   = 'CredentialGuard'
+        LocalValues = @(
+            # 1 = enabled with UEFI lock, 2 = enabled without lock. WinDSH uses 2.
+            @{ Path = $script:RegLsa; Name = 'LsaCfgFlags'; Type = 'DWord'; Value = 2
+               Note = 'Enabled without a UEFI lock, so it can be switched off again from Windows.' }
+        )
+        PolicyValues = @(
+            @{ Name = 'LsaCfgFlags'; Expected = 1 }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.5'; Profile = 'L1'
+            Title = "Ensure 'Credential Guard Configuration' is set to 'Enabled with UEFI lock'"
+            Expected = 'LsaCfgFlags = 1 (Group Policy hive, UEFI lock)'
+            Divergence = 'WinDSH sets LsaCfgFlags = 2 (enabled without UEFI lock) locally. CIS requires 1. The locked form cannot be removed remotely and needs a physically present user at the machine.'
+        }
+    }
+
+    [pscustomobject]@{
+        Id          = 'secure-launch'
+        Name        = 'System Guard Secure Launch'
+        PlainName   = 'Firmware attack protection'
+        Category    = 'Firmware'
+        Weight      = 10
+        RiskLevel   = 'Medium'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @('vbs')
+        Summary     = 'Re-establishes trust in the computer after start-up, so a compromised firmware cannot undermine the other protections.'
+        Why         = 'Protects the security container from exploited vulnerabilities in device firmware.'
+        Caution     = 'Needs DRTM-capable firmware (Intel TXT or AMD SKINIT). Most consumer laptops do not have it, and Windows silently ignores the setting when it is absent.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/system-guard-secure-launch-and-smm-protection'
+        DetectKey   = 'SecureLaunch'
+        LocalValues = @(
+            @{ Path = $script:RegSystemGuard; Name = 'Enabled'; Type = 'DWord'; Value = 1; Note = 'Turns Secure Launch on.' }
+        )
+        PolicyValues = @(
+            @{ Name = 'ConfigureSystemGuardLaunch'; Expected = 1 }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.6'; Profile = 'L1'
+            Title = "Ensure 'Secure Launch Configuration' is set to 'Enabled'"
+            Expected = 'ConfigureSystemGuardLaunch = 1 (Group Policy hive)'
+        }
+    }
+
+    [pscustomobject]@{
+        Id          = 'kernel-shadow-stacks'
+        Name        = 'Kernel-mode Hardware-enforced Stack Protection'
+        PlainName   = 'Code hijacking protection'
+        Category    = 'Kernel'
+        Weight      = 10
+        RiskLevel   = 'Medium'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @('vbs', 'hvci')
+        Summary     = 'Keeps a hardware-protected copy of where kernel code is meant to return to, so an exploit cannot redirect it.'
+        Why         = 'Stops memory-corruption exploits such as stack buffer overflows from hijacking kernel execution.'
+        Caution     = 'Requires Windows 11 22H2 or newer and an Intel Tiger Lake or AMD Zen 3 processor or newer. Once enforcing, a shadow stack violation is fatal to the offending code.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows-server/security/kernel-mode-hardware-stack-protection'
+        DetectKey   = 'KernelShadowStacks'
+        MinimumBuild = 22621
+        LocalValues = @(
+            @{ Path = $script:RegShadowStacks; Name = 'Enabled'; Type = 'DWord'; Value = 1; Note = 'Enables kernel shadow stacks in enforcement mode.' }
+        )
+        PolicyValues = @(
+            @{ Name = 'ConfigureKernelShadowStacksLaunch'; Expected = 1 }
+        )
+        Cis = [pscustomobject]@{
+            Id = '18.9.5.7'; Profile = 'L1'
+            Title = "Ensure 'Kernel-mode Hardware-enforced Stack Protection' is set to 'Enabled: Enabled in enforcement mode'"
+            Expected = 'ConfigureKernelShadowStacksLaunch = 1 (Group Policy hive)'
+        }
+    }
+
+    # ---- Detection only. WinDSH reports these but never configures them. -------
+    # Weight 0 deliberately: they are informational and mostly not user-actionable, so
+    # counting them would move the score without the user being able to do anything.
+
+    [pscustomobject]@{
+        Id          = 'hvpt'
+        Name        = 'Hypervisor-enforced Paging Translation'
+        PlainName   = 'Memory address protection'
+        Category    = 'Kernel'
+        Weight      = 0
+        RiskLevel   = 'Low'
+        Remediable  = $false
+        DetectionOnly = $true
+        Requires    = @()
+        Summary     = 'Moves control of memory address translation into the protected container.'
+        Why         = 'Stops an attacker with kernel access from remapping memory to bypass other protections.'
+        Caution     = 'Reported only. Windows enables this on supported hardware; WinDSH does not configure it.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity'
+        DetectKey   = 'Hvpt'
+        LocalValues = @()
+        PolicyValues = @()
+        Cis = $null
+    }
+
+    [pscustomobject]@{
+        Id          = 'smm-firmware-measurement'
+        Name        = 'SMM Firmware Measurement'
+        PlainName   = 'Firmware self-check'
+        Category    = 'Firmware'
+        Weight      = 0
+        RiskLevel   = 'Low'
+        Remediable  = $false
+        DetectionOnly = $true
+        Requires    = @()
+        Summary     = 'Measures System Management Mode firmware so tampering with it can be detected.'
+        Why         = 'System Management Mode runs beneath the operating system, so compromise there is invisible to Windows.'
+        Caution     = 'Reported only. Provided by the platform firmware; WinDSH does not configure it.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/hardware-security/system-guard-secure-launch-and-smm-protection'
+        DetectKey   = 'SmmFirmware'
+        LocalValues = @()
+        PolicyValues = @()
+        Cis = $null
+    }
+
+    [pscustomobject]@{
+        Id          = 'dep'
+        Name        = 'Data Execution Prevention'
+        PlainName   = 'Executable memory protection'
+        Category    = 'Kernel'
+        Weight      = 0
+        RiskLevel   = 'Low'
+        Remediable  = $false
+        DetectionOnly = $true
+        Requires    = @()
+        Summary     = 'Stops code running from memory that is only meant to hold data.'
+        Why         = 'A long-standing defence against buffer-overflow exploits.'
+        Caution     = 'Reported only. Configured in the boot configuration, not the registry; WinDSH does not change it.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/win32/memory/data-execution-prevention'
+        DetectKey   = 'Dep'
+        LocalValues = @()
+        PolicyValues = @()
+        Cis = $null
+    }
+
+    [pscustomobject]@{
+        Id          = 'driver-blocklist'
+        Name        = 'Microsoft vulnerable driver blocklist'
+        PlainName   = 'Known-bad driver blocking'
+        Category    = 'Kernel'
+        Weight      = 15
+        RiskLevel   = 'Low'
+        Remediable  = $true
+        DetectionOnly = $false
+        Requires    = @()
+        Summary     = 'Blocks drivers Microsoft has identified as dangerous, even when they are correctly signed.'
+        Why         = 'Attackers bring their own vulnerable signed driver to gain kernel access. This blocks the known ones.'
+        DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/application-security/application-control/design/microsoft-recommended-driver-block-rules'
+        DetectKey   = 'DriverBlocklist'
+        LocalValues = @(
+            @{ Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; Value = 1; Note = 'Turns the blocklist on.' }
+        )
+        PolicyValues = @()
+        Cis = $null   # Not covered by CIS 18.9.5. WinDSH does more than the benchmark here.
+    }
+)
+
+function Get-Control {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    $match = @($script:ControlCatalog | Where-Object { $_.Id -eq $Id })
+    if ($match.Count -ne 1) { throw "Unknown control id: $Id" }
+    return $match[0]
 }
 
-function Get-VirtualMachineAssessment {
+function Get-ControlIds { return @($script:ControlCatalog | Select-Object -ExpandProperty Id) }
+
+function Resolve-ControlOrder {
+    <# Dependencies first, deduplicated, with cycle detection. #>
     param(
-        [string]$Manufacturer,
-        [string]$Model
+        [Parameter(Mandatory = $true)][string]$Id,
+        [System.Collections.Generic.HashSet[string]]$Visiting
     )
-    $text = ('{0} {1}' -f $Manufacturer,$Model).Trim()
-    $detected = $false
-    $platform = $null
+    if (-not $Visiting) { $Visiting = New-Object 'System.Collections.Generic.HashSet[string]' }
+    if (-not $Visiting.Add($Id)) { throw "Dependency cycle detected at control '$Id'." }
 
-    if ($text -match '(?i)VMware') { $detected = $true; $platform = 'VMware' }
-    elseif ($text -match '(?i)VirtualBox|innotek') { $detected = $true; $platform = 'VirtualBox' }
-    elseif ($text -match '(?i)Microsoft Corporation.*Virtual Machine|Virtual Machine.*Microsoft Corporation') { $detected = $true; $platform = 'Hyper-V / Microsoft virtual machine' }
-    elseif ($text -match '(?i)KVM|QEMU') { $detected = $true; $platform = 'KVM/QEMU' }
-    elseif ($text -match '(?i)Xen|HVM domU') { $detected = $true; $platform = 'Xen' }
-    elseif ($text -match '(?i)Parallels') { $detected = $true; $platform = 'Parallels' }
-    elseif ($text -match '(?i)Nutanix') { $detected = $true; $platform = 'Nutanix AHV or related virtual platform' }
-
-    return [pscustomobject]@{
-        Detected = $detected
-        PlatformHint = $platform
-        Evidence = if ($detected) { $text } else { $null }
-        Note = if ($detected) { 'Virtual hardware capabilities depend on the hypervisor configuration; TPM and Secure Boot may be virtualized.' } else { $null }
+    $control = Get-Control -Id $Id
+    $ordered = @()
+    foreach ($dep in (ConvertTo-Array $control.Requires)) {
+        $ordered += Resolve-ControlOrder -Id $dep -Visiting $Visiting
     }
+    $ordered += $control
+    $Visiting.Remove($Id) | Out-Null
+
+    $seen = @{}
+    $unique = @()
+    foreach ($c in $ordered) {
+        if (-not $seen.ContainsKey($c.Id)) { $seen[$c.Id] = $true; $unique += $c }
+    }
+    return $unique
 }
 
-function Get-ComputerAndOsState {
-    try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop }
-    catch { Write-DebugException -Stage 'Query Win32_OperatingSystem' -ErrorRecord $_; throw }
-    try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop }
-    catch { Write-DebugException -Stage 'Query Win32_ComputerSystem' -ErrorRecord $_; throw }
-    try { $processors = @(Get-CimInstance Win32_Processor -ErrorAction Stop) }
-    catch { Write-DebugException -Stage 'Query Win32_Processor' -ErrorRecord $_; $processors = @() }
+# Applied by -EnableAllSafe. Deliberately excludes Credential Guard (compatibility risk)
+# and kernel shadow stacks (fatal violations), which stay opt-in.
+$script:SafeControlSet = @('vbs', 'platform-security', 'hvci-mat', 'hvci', 'driver-blocklist')
 
-    $cvPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-    $productName = Get-RegistryValueSafe -Path $cvPath -Name 'ProductName'
-    $displayVersion = Get-RegistryValueSafe -Path $cvPath -Name 'DisplayVersion'
-    $build = Get-RegistryValueSafe -Path $cvPath -Name 'CurrentBuildNumber'
-    $ubr = Get-RegistryValueSafe -Path $cvPath -Name 'UBR'
-    $editionId = Get-RegistryValueSafe -Path $cvPath -Name 'EditionID'
+# ===== 30-state.ps1 =====
+# ---------------------------------------------------------------------------
+# State collection.
+#
+# Split into static and volatile. Hardware, firmware, TPM and OS identity cannot change
+# while WinDSH is running, so they are collected once. Only the DeviceGuard state,
+# registry values and restart status are re-read after a change. In v1 every menu action
+# re-ran the whole collection, including Get-ComputerInfo and a bcdedit process spawn,
+# to learn a handful of registry DWORDs.
+# ---------------------------------------------------------------------------
 
-    if (-not $productName) { $productName = $os.Caption }
-    if (-not $build) { $build = $os.BuildNumber }
-    $buildInt = 0
-    [void][int]::TryParse([string]$build, [ref]$buildInt)
+$script:StaticState = $null
 
-    $rawProductName = [string]$productName
-    $displayProductName = $rawProductName
-    if ($buildInt -ge 22000 -and $displayProductName -match '^Windows 10\b') {
-        $displayProductName = $displayProductName -replace '^Windows 10', 'Windows 11'
+function Get-OsAndHardwareState {
+    $os = $null; $cs = $null; $cpus = @()
+    try { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop }
+    catch { Write-DebugError 'Query Win32_OperatingSystem' $_ }
+    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop }
+    catch { Write-DebugError 'Query Win32_ComputerSystem' $_ }
+    try { $cpus = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop) }
+    catch { Write-DebugError 'Query Win32_Processor' $_ }
+
+    $build = 0
+    $buildText = [string](Get-PropertySafe $os 'BuildNumber' '0')
+    [void][int]::TryParse($buildText, [ref]$build)
+
+    $ubr = $null
+    $editionId = $null
+    $productName = $null
+    try {
+        $cv = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        $ubr = Get-RegValue -Path $cv -Name 'UBR'
+        $editionId = Get-RegValue -Path $cv -Name 'EditionID'
+        $productName = Get-RegValue -Path $cv -Name 'ProductName'
     }
+    catch { Write-DebugError 'Read CurrentVersion' $_ }
 
-    $domainRole = [int](Get-ObjectPropertySafe -Object $cs -Name 'DomainRole' -Default 0)
-    $computer = [pscustomobject]@{
-        Name = $env:COMPUTERNAME
-        Manufacturer = [string]$cs.Manufacturer
-        Model = [string]$cs.Model
-        ProductName = [string]$displayProductName
-        RegistryProductName = [string]$rawProductName
-        EditionID = [string]$editionId
-        DisplayVersion = [string]$displayVersion
-        Build = if ($null -ne $ubr) { '{0}.{1}' -f $build,$ubr } else { [string]$build }
-        BuildNumber = $buildInt
-        OSArchitecture = [string]$os.OSArchitecture
-        Domain = [string]$cs.Domain
-        DomainRole = $domainRole
-        IsDomainController = [bool]($domainRole -eq 4 -or $domainRole -eq 5)
-    }
+    $manufacturer = [string](Get-PropertySafe $cs 'Manufacturer' '')
+    $model = [string](Get-PropertySafe $cs 'Model' '')
+    $domainRole = Get-PropertySafe $cs 'DomainRole' $null
+    $partOfDomain = [bool](Get-PropertySafe $cs 'PartOfDomain' $false)
 
-    $dep = [pscustomobject]@{
-        Available = Get-ObjectPropertySafe -Object $os -Name 'DataExecutionPrevention_Available' -Default $null
-        Drivers = Get-ObjectPropertySafe -Object $os -Name 'DataExecutionPrevention_Drivers' -Default $null
-        Applications32Bit = Get-ObjectPropertySafe -Object $os -Name 'DataExecutionPrevention_32BitApplications' -Default $null
-    }
+    $cpuName = 'Unknown'
+    if (@($cpus).Count -gt 0) { $cpuName = [string](Get-PropertySafe @($cpus)[0] 'Name' 'Unknown') }
+
+    # Virtual machines cannot always expose the hardware these features need.
+    $vmMarkers = 'VMware|VirtualBox|Virtual Machine|KVM|QEMU|Xen|Parallels|Hyper-V|Bochs|Google Compute|Amazon EC2'
+    $isVm = [bool](("$manufacturer $model") -match $vmMarkers)
 
     return [pscustomobject]@{
-        OS = $os
-        ComputerSystem = $cs
-        Processors = $processors
-        Computer = $computer
-        DEP = $dep
-        VirtualMachine = Get-VirtualMachineAssessment -Manufacturer $computer.Manufacturer -Model $computer.Model
+        Name           = $env:COMPUTERNAME
+        Manufacturer   = $manufacturer
+        Model          = $model
+        ProcessorName  = $cpuName
+        ProcessorCount = @($cpus).Count
+        OsCaption      = [string](Get-PropertySafe $os 'Caption' 'Unknown')
+        ProductName    = [string]$productName
+        EditionId      = [string]$editionId
+        BuildNumber    = $build
+        Ubr            = $ubr
+        Is64Bit        = [Environment]::Is64BitOperatingSystem
+        PartOfDomain   = $partOfDomain
+        DomainRole     = $domainRole
+        IsVirtual      = $isVm
     }
 }
 
 function Get-FirmwareState {
-    $firmwareType = 'Unknown'
-    try {
-        $ci = Get-ComputerInfo -Property BiosFirmwareType -ErrorAction Stop
-        if ($null -ne $ci.BiosFirmwareType) { $firmwareType = [string]$ci.BiosFirmwareType }
+    # Type is a display string and must never drive logic: it can legitimately read
+    # 'Legacy BIOS or unsupported UEFI', which contains the substring 'UEFI'.
+    $type = 'Unknown'; $mode = 'Unknown'; $source = 'None'
+
+    $envFirmware = [string]$env:firmware_type
+    if ($envFirmware -eq 'UEFI') { $mode = 'UEFI'; $type = 'UEFI'; $source = 'Environment' }
+    elseif ($envFirmware -eq 'Legacy') { $mode = 'Legacy'; $type = 'Legacy BIOS'; $source = 'Environment' }
+
+    if ($mode -eq 'Unknown') {
+        try {
+            $ci = Get-ComputerInfo -Property BiosFirmwareType -ErrorAction Stop
+            $bios = [string](Get-PropertySafe $ci 'BiosFirmwareType' '')
+            if ($bios -eq 'Uefi') { $mode = 'UEFI'; $type = 'UEFI'; $source = 'Get-ComputerInfo' }
+            elseif ($bios -eq 'Bios') { $mode = 'Legacy'; $type = 'Legacy BIOS'; $source = 'Get-ComputerInfo' }
+        }
+        catch { Write-DebugError 'Determine firmware type' $_ }
     }
-    catch { Write-DebugException -Stage 'Determine BIOS firmware type' -ErrorRecord $_ }
 
     $secureBootSupported = $false
     $secureBootEnabled = $null
     try {
         $secureBootEnabled = [bool](Confirm-SecureBootUEFI -ErrorAction Stop)
         $secureBootSupported = $true
-        if ($firmwareType -eq 'Unknown') { $firmwareType = 'UEFI' }
+        if ($mode -eq 'Unknown') { $mode = 'UEFI'; $type = 'UEFI'; $source = 'Confirm-SecureBootUEFI' }
     }
     catch {
-        Write-DebugException -Stage 'Query Secure Boot state' -ErrorRecord $_
-        if ($firmwareType -eq 'Unknown') { $firmwareType = 'Legacy BIOS or unsupported UEFI' }
+        Write-DebugError 'Query Secure Boot' $_
+        if ($mode -eq 'Unknown') { $type = 'Legacy BIOS or unsupported UEFI' }
     }
 
     return [pscustomobject]@{
-        Type = $firmwareType
+        Type = $type
+        Mode = $mode
+        IsUefiConfirmed = [bool]($mode -eq 'UEFI')
+        IsLegacyConfirmed = [bool]($mode -eq 'Legacy')
+        DetectionSource = $source
         SecureBootSupported = $secureBootSupported
         SecureBootEnabled = $secureBootEnabled
     }
 }
 
 function Get-TpmState {
-    $present = $false
-    $ready = $false
-    $enabled = $null
-    $activated = $null
-    $specVersion = $null
-    $manufacturer = $null
+    $present = $false; $ready = $null; $spec = $null; $isTpm2 = $false
     try {
         $tpm = Get-Tpm -ErrorAction Stop
-        $present = [bool]$tpm.TpmPresent
-        $ready = [bool]$tpm.TpmReady
-        $enabled = $tpm.TpmEnabled
-        $activated = $tpm.TpmActivated
+        $present = [bool](Get-PropertySafe $tpm 'TpmPresent' $false)
+        $ready = Get-PropertySafe $tpm 'TpmReady' $null
     }
-    catch { Write-DebugException -Stage 'Query Get-Tpm' -ErrorRecord $_ }
+    catch { Write-DebugError 'Get-Tpm' $_ }
 
-    if ($present) {
-        try {
-            $tpmWmi = Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction Stop
-            $specVersion = [string]$tpmWmi.SpecVersion
-            $manufacturer = [string]$tpmWmi.ManufacturerVersionInfo
-        }
-        catch { Write-DebugException -Stage 'Query Win32_Tpm details' -ErrorRecord $_ }
+    try {
+        $wmi = Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftTpm' -ClassName 'Win32_Tpm' -ErrorAction Stop
+        $spec = [string](Get-PropertySafe $wmi 'SpecVersion' '')
+        if ($spec -match '^\s*2\.0') { $isTpm2 = $true; $present = $true }
     }
+    catch { Write-DebugError 'Query Win32_Tpm' $_ }
 
-    $isTpm2 = [bool]($present -and (-not [string]::IsNullOrWhiteSpace($specVersion)) -and ($specVersion -match '(^|\D)2\.0(\D|$)'))
     return [pscustomobject]@{
         Present = $present
         Ready = $ready
-        Enabled = $enabled
-        Activated = $activated
-        SpecVersion = $specVersion
+        SpecVersion = $spec
         IsTPM2 = $isTpm2
-        ManufacturerVersionInfo = $manufacturer
     }
 }
 
 function Get-VirtualizationState {
-    param(
-        [Parameter(Mandatory=$true)]$ComputerSystem,
-        [AllowEmptyCollection()][object[]]$Processors
-    )
-    $processorsArray = @($Processors)
-    $hypervisorPresent = [bool](Get-ObjectPropertySafe -Object $ComputerSystem -Name 'HypervisorPresent' -Default $false)
-    $vmMonitor = @($processorsArray | Where-Object { (Get-ObjectPropertySafe -Object $_ -Name 'VMMonitorModeExtensions' -Default $false) -eq $true }).Count -gt 0
-    $virtFirmwareRaw = @($processorsArray | Where-Object { (Get-ObjectPropertySafe -Object $_ -Name 'VirtualizationFirmwareEnabled' -Default $false) -eq $true }).Count -gt 0
-    $slat = @($processorsArray | Where-Object { (Get-ObjectPropertySafe -Object $_ -Name 'SecondLevelAddressTranslationExtensions' -Default $false) -eq $true }).Count -gt 0
-    $virtualizationEnabled = [bool]($virtFirmwareRaw -or $hypervisorPresent)
-    $slatAssessment = if ($slat) {
-        'Supported / reported by CPU'
+    $hypervisorPresent = $false; $vmx = $null; $slat = $null
+    try {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        $hypervisorPresent = [bool](Get-PropertySafe $cs 'HypervisorPresent' $false)
     }
-    elseif ($hypervisorPresent) {
-        'Not reported by Win32_Processor while hypervisor is active'
+    catch { Write-DebugError 'Query HypervisorPresent' $_ }
+
+    try {
+        $cpu = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)[0]
+        $vmx = Get-PropertySafe $cpu 'VirtualizationFirmwareEnabled' $null
+        $slat = Get-PropertySafe $cpu 'SecondLevelAddressTranslationExtensions' $null
     }
-    else {
-        'Not reported / unsupported'
-    }
+    catch { Write-DebugError 'Query processor virtualization' $_ }
+
+    # When Hyper-V owns the CPU, VirtualizationFirmwareEnabled often reports false even
+    # though virtualization is plainly working. Treat a running hypervisor as proof.
+    $enabled = [bool]($vmx -or $hypervisorPresent)
+
     return [pscustomobject]@{
         HypervisorPresent = $hypervisorPresent
-        VMMonitorModeExtensions = $vmMonitor
-        VirtualizationFirmwareEnabled = $virtualizationEnabled
-        VirtualizationFirmwareRaw = $virtFirmwareRaw
-        SLAT = $slat
-        SLATAssessment = $slatAssessment
+        FirmwareEnabled = $enabled
+        FirmwareRaw = $vmx
+        Slat = $slat
     }
 }
 
-function Get-DeviceGuardFeatureState {
-    param(
-        $DeviceGuard,
-        [Parameter(Mandatory=$true)]$Computer,
-        [Parameter(Mandatory=$true)]$Firmware,
-        [Parameter(Mandatory=$true)]$TPM
-    )
-
-    $available = @()
-    $configured = @()
-    $running = @()
-    $vbsStatus = $null
-    if ($DeviceGuard) {
-        $available = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'AvailableSecurityProperties' -Default @()))
-        $configured = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'SecurityServicesConfigured' -Default @()))
-        $running = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'SecurityServicesRunning' -Default @()))
-        $rawVbsStatus = Get-ObjectPropertySafe -Object $DeviceGuard -Name 'VirtualizationBasedSecurityStatus'
-        if ($null -ne $rawVbsStatus) { $vbsStatus = [int]$rawVbsStatus }
+function Get-HypervisorLaunchState {
+    # hypervisorlaunchtype=Off blocks every VBS feature regardless of the registry, and is
+    # invisible in the registry. This is one of the most common causes of a feature that
+    # is configured but never runs.
+    $launchType = $null; $source = 'Unavailable'; $errorText = $null
+    $previousEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $bcdedit = Join-Path $env:SystemRoot 'System32\bcdedit.exe'
+        if (Test-Path -LiteralPath $bcdedit) {
+            $raw = @(& $bcdedit '/enum' '{current}' 2>&1 | ForEach-Object { [string]$_ })
+            if ($LASTEXITCODE -eq 0) {
+                $source = 'bcdedit'
+                $line = @($raw | Where-Object { $_ -match '^\s*hypervisorlaunchtype\s+' }) | Select-Object -First 1
+                if ($line) { $launchType = ($line -replace '^\s*hypervisorlaunchtype\s+', '').Trim() }
+                else { $launchType = 'NotSet' }
+            }
+            else { $errorText = 'bcdedit exit code {0}' -f $LASTEXITCODE }
+        }
+        else { $errorText = 'bcdedit.exe not found' }
     }
+    catch { $errorText = $_.Exception.Message; Write-DebugError 'Query hypervisorlaunchtype' $_ }
+    finally { $ErrorActionPreference = $previousEap }
 
-    $dgPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
-    $hvciRegPath = Join-Path $dgPath 'Scenarios\HypervisorEnforcedCodeIntegrity'
-    $systemGuardRegPath = Join-Path $dgPath 'Scenarios\SystemGuard'
-    $kernelStackRegPath = Join-Path $dgPath 'Scenarios\KernelShadowStacks'
-    $ciConfigPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'
-    $policyDGPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard'
-    $lsaPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
-
-    $vbsReg = Get-RegistryValueSafe -Path $dgPath -Name 'EnableVirtualizationBasedSecurity'
-    $platformSecurityReg = Get-RegistryValueSafe -Path $dgPath -Name 'RequirePlatformSecurityFeatures'
-    $hvciReg = Get-RegistryValueSafe -Path $hvciRegPath -Name 'Enabled'
-    $systemGuardReg = Get-RegistryValueSafe -Path $systemGuardRegPath -Name 'Enabled'
-    $kernelStackReg = Get-RegistryValueSafe -Path $kernelStackRegPath -Name 'Enabled'
-    $blocklistReg = Get-RegistryValueSafe -Path $ciConfigPath -Name 'VulnerableDriverBlocklistEnable'
-    $lsaCfgFlags = Get-RegistryValueSafe -Path $lsaPath -Name 'LsaCfgFlags'
-
-    $policyVbs = Get-RegistryValueSafe -Path $policyDGPath -Name 'EnableVirtualizationBasedSecurity'
-    $policyHvci = Get-RegistryValueSafe -Path $policyDGPath -Name 'HypervisorEnforcedCodeIntegrity'
-    $policySecureLaunch = Get-RegistryValueSafe -Path $policyDGPath -Name 'ConfigureSystemGuardLaunch'
-    $policyCredentialGuard = Get-RegistryValueSafe -Path $policyDGPath -Name 'LsaCfgFlags'
-
-    $credentialGuardConfigured = (Test-ArrayContains $configured 1) -or ($lsaCfgFlags -eq 1) -or ($lsaCfgFlags -eq 2) -or ($policyCredentialGuard -eq 1) -or ($policyCredentialGuard -eq 2)
-    $credentialGuardRunning = Test-ArrayContains $running 1
-    $hvciConfigured = (Test-ArrayContains $configured 2) -or ($hvciReg -eq 1)
-    $hvciRunning = Test-ArrayContains $running 2
-    $secureLaunchConfigured = (Test-ArrayContains $configured 3) -or ($systemGuardReg -eq 1) -or ($policySecureLaunch -eq 1)
-    $secureLaunchRunning = Test-ArrayContains $running 3
-    $smmMeasurementConfigured = Test-ArrayContains $configured 4
-    $smmMeasurementRunning = Test-ArrayContains $running 4
-    $kernelStackConfigured = (Test-ArrayContains $configured 5) -or (Test-ArrayContains $configured 6) -or ($kernelStackReg -eq 1)
-    $kernelStackRunning = Test-ArrayContains $running 5
-    $kernelStackAudit = Test-ArrayContains $running 6
-    $hsptConfigured = Test-ArrayContains $configured 7
-    $hsptRunning = Test-ArrayContains $running 7
-
-    $isWin11 = ($Computer.BuildNumber -ge 22000)
-    $blocklistEffective = 'Unknown'
-    if ($hvciRunning) { $blocklistEffective = 'Enforced by Memory Integrity (HVCI)' }
-    elseif ($blocklistReg -eq 1) { $blocklistEffective = 'Enabled by explicit local preference' }
-    elseif ($blocklistReg -eq 0) { $blocklistEffective = 'Disabled by explicit local preference' }
-    elseif ($isWin11 -and $Computer.BuildNumber -ge 22621) { $blocklistEffective = 'Windows default is enabled; no explicit local override found' }
-    else { $blocklistEffective = 'No explicit local preference found' }
-
-    $hardware = [pscustomobject]@{
-        HypervisorSupport = (Test-ArrayContains $available 1)
-        SecureBootCapability = (Test-ArrayContains $available 2)
-        DMACapability = (Test-ArrayContains $available 3)
-        SecureMemoryOverwrite = (Test-ArrayContains $available 4)
-        NXAvailable = (Test-ArrayContains $available 5)
-        SMMMitigations = (Test-ArrayContains $available 6)
-        MBECorGMET = (Test-ArrayContains $available 7)
-        APICVirtualization = (Test-ArrayContains $available 8)
-        RawAvailableSecurityProperties = $available
+    $blocks = [bool]($launchType -and ($launchType -match '^(?i)off$'))
+    return [pscustomobject]@{
+        LaunchType = $launchType
+        Source = $source
+        BlocksVbs = $blocks
+        Error = $errorText
     }
+}
 
-    $features = [pscustomobject]@{
-        CredentialGuard = [pscustomobject]@{
-            Configured = $credentialGuardConfigured
-            Running = $credentialGuardRunning
-            LsaCfgFlags = $lsaCfgFlags
-            ManagedByPolicy = ($null -ne $policyCredentialGuard)
-            PolicyValue = $policyCredentialGuard
-            EditionSupported = (Test-CredentialGuardEditionSupport -EditionID ([string]$Computer.EditionID))
-        }
-        MemoryIntegrity = [pscustomobject]@{
-            Configured = $hvciConfigured
-            Running = $hvciRunning
-            RegistryEnabled = $hvciReg
-            ManagedByPolicy = (($null -ne $policyVbs) -or ($null -ne $policyHvci))
-        }
-        SecureLaunch = [pscustomobject]@{
-            Configured = $secureLaunchConfigured
-            Running = $secureLaunchRunning
-            RegistryEnabled = $systemGuardReg
-            ManagedByPolicy = ($null -ne $policySecureLaunch)
-            BasicPrerequisitesConfirmed = [bool](($Firmware.Type -match 'UEFI') -and $TPM.IsTPM2)
-        }
-        SMMFirmwareMeasurement = [pscustomobject]@{
-            Configured = $smmMeasurementConfigured
-            Running = $smmMeasurementRunning
-        }
-        KernelStackProtection = [pscustomobject]@{
-            Configured = $kernelStackConfigured
-            Running = $kernelStackRunning
-            AuditMode = $kernelStackAudit
-            RegistryEnabled = $kernelStackReg
-            WindowsVersionEligible = ($isWin11 -and $Computer.BuildNumber -ge 22621)
-        }
-        HypervisorEnforcedPagingTranslation = [pscustomobject]@{
-            Configured = $hsptConfigured
-            Running = $hsptRunning
-        }
-        VulnerableDriverBlocklist = [pscustomobject]@{
-            RegistryValue = $blocklistReg
-            EffectiveAssessment = $blocklistEffective
-        }
+function Get-DeviceGuardState {
+    $dg = $null
+    try {
+        $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
+                -ClassName 'Win32_DeviceGuard' -ErrorAction Stop
     }
+    catch { Write-DebugError 'Query Win32_DeviceGuard' $_ }
 
-    $policy = [pscustomobject]@{
-        EnableVirtualizationBasedSecurity = $policyVbs
-        HypervisorEnforcedCodeIntegrity = $policyHvci
-        ConfigureSystemGuardLaunch = $policySecureLaunch
-        CredentialGuardLsaCfgFlags = $policyCredentialGuard
-    }
-
-    $raw = if ($DeviceGuard) {
-        [pscustomobject]@{
-            RequiredSecurityProperties = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'RequiredSecurityProperties' -Default @()))
-            AvailableSecurityProperties = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'AvailableSecurityProperties' -Default @()))
-            SecurityServicesConfigured = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'SecurityServicesConfigured' -Default @()))
-            SecurityServicesRunning = @((Get-ObjectPropertySafe -Object $DeviceGuard -Name 'SecurityServicesRunning' -Default @()))
-            VirtualizationBasedSecurityStatus = (Get-ObjectPropertySafe -Object $DeviceGuard -Name 'VirtualizationBasedSecurityStatus')
-            SmmIsolationLevel = (Get-ObjectPropertySafe -Object $DeviceGuard -Name 'SmmIsolationLevel')
-            CodeIntegrityPolicyEnforcementStatus = (Get-ObjectPropertySafe -Object $DeviceGuard -Name 'CodeIntegrityPolicyEnforcementStatus')
-            UsermodeCodeIntegrityPolicyEnforcementStatus = (Get-ObjectPropertySafe -Object $DeviceGuard -Name 'UsermodeCodeIntegrityPolicyEnforcementStatus')
-        }
-    } else { $null }
+    $configured = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesConfigured' @())
+    $running    = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesRunning' @())
+    $available  = ConvertTo-Array (Get-PropertySafe $dg 'AvailableSecurityProperties' @())
+    $required   = ConvertTo-Array (Get-PropertySafe $dg 'RequiredSecurityProperties' @())
+    $vbsStatus  = Get-PropertySafe $dg 'VirtualizationBasedSecurityStatus' $null
+    $ciPolicy   = Get-PropertySafe $dg 'CodeIntegrityPolicyEnforcementStatus' $null
 
     return [pscustomobject]@{
-        HardwareCapabilities = $hardware
-        VBS = [pscustomobject]@{
-            StatusCode = $vbsStatus
-            Status = (ConvertTo-DGStatusText -Value $vbsStatus)
-            RegistryEnabled = $vbsReg
-            RequirePlatformSecurityFeatures = $platformSecurityReg
-        }
-        Features = $features
-        Policy = $policy
-        DeviceGuardRaw = $raw
+        Available = $dg -ne $null
+        Configured = $configured
+        Running = $running
+        AvailableProperties = $available
+        RequiredProperties = $required
+        VbsStatusCode = $vbsStatus
+        VbsStatusText = (ConvertTo-VbsStatusText $vbsStatus)
+        CodeIntegrityPolicyEnforcement = $ciPolicy
+        # AvailableSecurityProperties: 1 hypervisor, 2 Secure Boot, 3 DMA protection,
+        # 4 secure memory overwrite, 5 NX, 6 SMM mitigations, 7 MBEC, 8 APIC virtualization
+        HasHypervisorSupport = (Test-Contains $available 1)
+        HasSecureBootProperty = (Test-Contains $available 2)
+        HasDmaProtection = (Test-Contains $available 3)
+        HasSmmMitigations = (Test-Contains $available 6)
+        HasMbec = (Test-Contains $available 7)
     }
 }
 
-function Get-SystemState {
-    # v1.5 keeps this orchestration function intentionally small. Each domain collector
-    # can fail/log independently and can be regression-tested without a 300-line monolith.
-    $base = Get-ComputerAndOsState
-    $firmware = Get-FirmwareState
-    $tpm = Get-TpmState
-    $virtualization = Get-VirtualizationState -ComputerSystem $base.ComputerSystem -Processors @($base.Processors)
-    $dg = Get-DeviceGuardState
-    $security = Get-DeviceGuardFeatureState -DeviceGuard $dg -Computer $base.Computer -Firmware $firmware -TPM $tpm
+function ConvertTo-VbsStatusText {
+    param($Value)
+    if ($null -eq $Value) { return 'Unknown' }
+    switch ([int]$Value) {
+        0 { 'Not enabled' }
+        1 { 'Configured, not running' }
+        2 { 'Running' }
+        default { 'Unknown ({0})' -f $Value }
+    }
+}
 
+function Get-DepState {
+    $policy = $null; $supported = $null
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $policy = Get-PropertySafe $os 'DataExecutionPrevention_SupportPolicy' $null
+        $supported = Get-PropertySafe $os 'DataExecutionPrevention_Available' $null
+    }
+    catch { Write-DebugError 'Query DEP state' $_ }
+
+    # 0 AlwaysOff, 1 AlwaysOn, 2 OptIn (Windows components only), 3 OptOut (all programs)
+    $text = switch ($policy) {
+        0 { 'Always off' }
+        1 { 'Always on' }
+        2 { 'On for Windows programs only' }
+        3 { 'On for all programs' }
+        default { 'Unknown' }
+    }
     return [pscustomobject]@{
-        Timestamp = (Get-Date).ToString('s')
-        Computer = $base.Computer
-        VirtualMachine = $base.VirtualMachine
-        Firmware = $firmware
-        TPM = $tpm
-        Virtualization = $virtualization
-        HardwareCapabilities = $security.HardwareCapabilities
-        DEP = $base.DEP
-        VBS = $security.VBS
-        Features = $security.Features
-        Policy = $security.Policy
-        Restart = Get-PendingRestartState
-        DeviceGuardRaw = $security.DeviceGuardRaw
+        SupportPolicy = $policy
+        Available = $supported
+        Text = $text
+        Enabled = [bool]($null -ne $policy -and [int]$policy -ne 0)
     }
 }
 
-function Get-UnsupportedCapabilities {
-    param([Parameter(Mandatory=$true)]$State)
-    $items = @()
+function Get-VirtualMachineAssessment {
+    param([Parameter(Mandatory = $true)]$Computer, [Parameter(Mandatory = $true)]$Virtualization)
 
-    if (-not $State.Firmware.SecureBootSupported) {
-        $items += [pscustomobject]@{ Feature='Secure Boot'; Status='Unavailable or not exposed to Windows'; Reason='Native UEFI Secure Boot support is not confirmed.' }
-    }
-    if (-not $State.TPM.Present) {
-        $items += [pscustomobject]@{ Feature='TPM / Security Processor'; Status='Not available'; Reason='Windows cannot see a TPM. Check Intel PTT / AMD fTPM / discrete TPM availability.' }
-    }
-    elseif (-not $State.TPM.IsTPM2) {
-        $items += [pscustomobject]@{ Feature='TPM 2.0'; Status='Not confirmed'; Reason=('Reported TPM specification: {0}' -f $(if ($State.TPM.SpecVersion) {$State.TPM.SpecVersion} else {'unknown'})) }
-    }
-    if (-not $State.HardwareCapabilities.DMACapability) {
-        $items += [pscustomobject]@{ Feature='Kernel DMA / Memory Access Protection'; Status='Capability not reported'; Reason='The platform may require VT-d/IOMMU firmware support or may not implement Kernel DMA Protection.' }
-    }
-    if (-not $State.Features.CredentialGuard.EditionSupported) {
-        $items += [pscustomobject]@{ Feature='Credential Guard local enable action'; Status='Unavailable for this edition'; Reason=('Detected edition: {0}; WinDSH keeps this action to supported Enterprise/Education editions.' -f $State.Computer.EditionID) }
-    }
-    if (-not $State.Features.KernelStackProtection.WindowsVersionEligible) {
-        $items += [pscustomobject]@{ Feature='Kernel hardware stack protection'; Status='Not available on this Windows build'; Reason='Windows 11 22H2 or later is required for the client feature surface used by WinDSH.' }
-    }
-    if (-not $State.Features.SecureLaunch.BasicPrerequisitesConfirmed) {
-        $reason = if ($State.Firmware.Type -match 'Legacy') { 'UEFI firmware mode is not confirmed.' } elseif (-not $State.TPM.IsTPM2) { 'TPM 2.0 is not confirmed.' } else { 'Basic platform prerequisites are not confirmed.' }
-        $items += [pscustomobject]@{ Feature='Secure Launch local enable action'; Status='Unavailable until prerequisite is met'; Reason=$reason }
+    if (-not $Computer.IsVirtual) {
+        return [pscustomobject]@{ IsVirtual = $false; Platform = $null; Notes = @() }
     }
 
-    return $items
-}
+    $platform = 'Unknown virtualization platform'
+    $text = '{0} {1}' -f $Computer.Manufacturer, $Computer.Model
+    if ($text -match 'VMware') { $platform = 'VMware' }
+    elseif ($text -match 'VirtualBox') { $platform = 'VirtualBox' }
+    elseif ($text -match 'Hyper-V|Virtual Machine') { $platform = 'Hyper-V' }
+    elseif ($text -match 'KVM|QEMU') { $platform = 'KVM/QEMU' }
+    elseif ($text -match 'Xen') { $platform = 'Xen' }
+    elseif ($text -match 'Parallels') { $platform = 'Parallels' }
+    elseif ($text -match 'Amazon EC2') { $platform = 'Amazon EC2' }
+    elseif ($text -match 'Google Compute') { $platform = 'Google Compute Engine' }
 
-function Get-MenuActionAvailability {
-    param(
-        [Parameter(Mandatory=$true)]$State,
-        [Parameter(Mandatory=$true)][string]$Key
+    $notes = @(
+        'This is a virtual machine, so these protections depend on what the host exposes to it.'
+        'Nested virtualization must be enabled on the host for VBS to run inside the guest.'
     )
-    $keyUpper = $Key.ToUpperInvariant()
-    $result = [ordered]@{ Key=$keyUpper; Actionable=$true; Category='Ready'; Reason=''; Note='' }
-
-    switch ($keyUpper) {
-        '2' {
-            if ($State.Features.MemoryIntegrity.Running) { $result.Actionable=$false; $result.Category='Already'; $result.Reason='Memory Integrity is already running.' }
-            elseif ($State.Features.MemoryIntegrity.ManagedByPolicy) { $result.Actionable=$false; $result.Category='Policy'; $result.Reason='Memory Integrity/VBS is managed by organization policy.' }
-            elseif ($State.Computer.BuildNumber -lt 14393) { $result.Actionable=$false; $result.Category='Prerequisite'; $result.Reason='This Windows build does not support the WinDSH HVCI configuration path.' }
-            elseif (-not $State.Virtualization.VirtualizationFirmwareEnabled) { $result.Note='Selectable, but CPU virtualization appears disabled in BIOS/UEFI; it may not run until firmware is changed.' }
-        }
-        '3' {
-            if ($State.Features.SecureLaunch.Running) { $result.Actionable=$false; $result.Category='Already'; $result.Reason='Secure Launch is already running.' }
-            elseif ($State.Features.SecureLaunch.ManagedByPolicy) { $result.Actionable=$false; $result.Category='Policy'; $result.Reason='Secure Launch is managed by organization policy.' }
-            elseif ($State.Firmware.Type -match 'Legacy') { $result.Actionable=$false; $result.Category='Prerequisite'; $result.Reason='Secure Launch requires UEFI firmware mode.' }
-            elseif (-not $State.TPM.IsTPM2) { $result.Actionable=$false; $result.Category='Prerequisite'; $result.Reason='TPM 2.0 is not confirmed.' }
-            elseif (-not $State.Virtualization.VirtualizationFirmwareEnabled) { $result.Note='Selectable, but CPU virtualization appears disabled in BIOS/UEFI.' }
-        }
-        '4' {
-            if ($State.Features.CredentialGuard.Running) { $result.Actionable=$false; $result.Category='Already'; $result.Reason='Credential Guard is already running.' }
-            elseif ($State.Computer.IsDomainController) { $result.Actionable=$false; $result.Category='Prerequisite'; $result.Reason='WinDSH does not enable Credential Guard on domain controllers.' }
-            elseif (-not $State.Features.CredentialGuard.EditionSupported) { $result.Actionable=$false; $result.Category='Prerequisite'; $result.Reason=('Unsupported/licensing not confirmed for edition {0}.' -f $State.Computer.EditionID) }
-            elseif ($State.Features.CredentialGuard.ManagedByPolicy) { $result.Actionable=$false; $result.Category='Policy'; $result.Reason='Credential Guard is managed by organization policy.' }
-            elseif (($null -ne $State.Policy.EnableVirtualizationBasedSecurity) -and ($State.Policy.EnableVirtualizationBasedSecurity -eq 0)) { $result.Actionable=$false; $result.Category='Policy'; $result.Reason='VBS is disabled by organization policy.' }
-            elseif (-not $State.Virtualization.VirtualizationFirmwareEnabled) { $result.Note='Selectable, but CPU virtualization appears disabled in BIOS/UEFI.' }
-        }
-        '5' {
-            if ($State.Features.MemoryIntegrity.Running) { $result.Actionable=$false; $result.Category='Already'; $result.Reason='The vulnerable-driver blocklist is already enforced with running HVCI.' }
-            elseif ($State.Features.VulnerableDriverBlocklist.RegistryValue -eq 1) { $result.Actionable=$false; $result.Category='Already'; $result.Reason='The explicit local vulnerable-driver blocklist preference is already enabled.' }
-        }
-        'A' {
-            $mi = Get-MenuActionAvailability -State $State -Key '2'
-            $sg = Get-MenuActionAvailability -State $State -Key '3'
-            if (-not $mi.Actionable -and -not $sg.Actionable) {
-                $result.Actionable=$false
-                if ($mi.Category -eq 'Policy' -or $sg.Category -eq 'Policy') { $result.Category='Policy' } else { $result.Category='Already' }
-                $result.Reason='No Safe action is currently locally actionable. See the grayed items above for details.'
-            }
-            elseif (-not $mi.Actionable) {
-                $result.Note=('Secure Launch remains actionable; Memory Integrity will be skipped: {0}' -f $mi.Reason)
-            }
-            elseif (-not $sg.Actionable) {
-                $result.Note=('Memory Integrity remains actionable; Secure Launch will be skipped: {0}' -f $sg.Reason)
-            }
-        }
-        'P' {
-            $a = Get-MenuActionAvailability -State $State -Key 'A'
-            if (-not $a.Actionable) { $result.Actionable=$false; $result.Category=$a.Category; $result.Reason=$a.Reason }
-        }
+    if ($platform -eq 'Amazon EC2' -or $platform -eq 'Google Compute Engine') {
+        $notes += 'Cloud instances frequently do not expose the hardware these features need.'
     }
-    return [pscustomobject]$result
+    if (-not $Virtualization.FirmwareEnabled) {
+        $notes += 'The host is not exposing hardware-assisted virtualization (Intel VT-x / AMD-V) to this guest.'
+    }
+    return [pscustomobject]@{ IsVirtual = $true; Platform = $platform; Notes = $notes }
 }
 
-function Write-MenuAction {
-    param(
-        [Parameter(Mandatory=$true)][string]$Key,
-        [Parameter(Mandatory=$true)][string]$Text,
-        [Parameter(Mandatory=$true)]$Availability
-    )
-    if (-not $Availability.Actionable) {
-        Write-Host ('  [{0}] {1}  [UNAVAILABLE: {2}]' -f $Key,$Text,$Availability.Reason) -ForegroundColor DarkGray
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace($Availability.Note)) {
-        Write-Host ('  [{0}] {1}' -f $Key,$Text) -ForegroundColor Yellow
-        Write-Host ('      Note: {0}' -f $Availability.Note) -ForegroundColor DarkYellow
-    }
-    else {
-        Write-Host ('  [{0}] {1}' -f $Key,$Text)
-    }
-}
+function Get-CodeIntegrityEvents {
+    <#
+        Reads driver-compatibility evidence from the Code Integrity log. Feeds BOTH the
+        Memory Integrity diagnostic and the pre-flight safety check, so the log is parsed
+        once and the two can never disagree.
 
-function Test-MenuActionSelectable {
-    param(
-        [Parameter(Mandatory=$true)]$State,
-        [Parameter(Mandatory=$true)][string]$Key
-    )
-    $availability = Get-MenuActionAvailability -State $State -Key $Key
-    if ($availability.Actionable) { return $true }
-    Write-Host ('This action is unavailable: {0}' -f $availability.Reason) -ForegroundColor Yellow
-    return $false
-}
+        Driver names are resolved to a publisher and version where possible: telling
+        someone "vendor X driver 2.1.0 is blocking this" is far more actionable than
+        showing them a bare .sys filename.
+    #>
+    param([int[]]$EventIds = @(3087), [int]$LookbackDays = 14, [int]$MaxEvents = 80)
 
-function Get-FirmwareActions {
-    param([Parameter(Mandatory=$true)]$State)
-    Write-DebugLog 'Get-FirmwareActions: BEGIN'
-    $items = @()
-
-    if ($State.Firmware.Type -match 'Legacy') {
-        $items += [pscustomobject]@{
-            Item = 'UEFI firmware mode'
-            Current = $State.Firmware.Type
-            Needed = 'UEFI mode is required for Secure Boot and several modern protections.'
-            Action = 'Technician action required. Do not simply switch an installed Legacy/MBR system to UEFI without checking boot-disk compatibility.'
-        }
+    $result = [pscustomobject]@{
+        Queried = $false
+        LogAvailable = $false
+        EventCount = 0
+        Drivers = @()
+        Newest = $null
+        Error = $null
     }
 
-    if ($State.Firmware.SecureBootSupported -and -not $State.Firmware.SecureBootEnabled) {
-        $items += [pscustomobject]@{
-            Item = 'Secure Boot'
-            Current = 'Supported, but OFF'
-            Needed = 'Recommended/required by several hardware-backed protections.'
-            Action = 'Enable Secure Boot in UEFI firmware. This script does not modify Secure Boot keys or firmware state.'
-        }
-    }
-    elseif (-not $State.Firmware.SecureBootSupported) {
-        $items += [pscustomobject]@{
-            Item = 'Secure Boot'
-            Current = 'Not available to Windows'
-            Needed = 'Secure Boot requires native UEFI firmware mode.'
-            Action = 'Check whether the PC is using Legacy/CSM mode or whether the platform lacks Secure Boot.'
-        }
-    }
+    $start = (Get-Date).AddDays(-[math]::Abs($LookbackDays))
+    $logs = @('Microsoft-Windows-CodeIntegrity/Operational')
+    $messages = @()
 
-    if (-not $State.Virtualization.VirtualizationFirmwareEnabled) {
-        $items += [pscustomobject]@{
-            Item = 'CPU virtualization'
-            Current = 'OFF or not reported to Windows'
-            Needed = 'Required for VBS, Memory Integrity and related protections.'
-            Action = 'Enable Intel Virtualization Technology/VT-x or AMD SVM/AMD-V in UEFI/BIOS.'
-        }
-    }
-
-    if (-not $State.TPM.Present) {
-        $items += [pscustomobject]@{
-            Item = 'TPM / Security Processor'
-            Current = 'Not visible to Windows'
-            Needed = 'TPM 2.0 strengthens measured boot and is required for System Guard DRTM scenarios.'
-            Action = 'Check UEFI for Intel PTT, AMD fTPM, Security Device Support, or a discrete TPM. Hardware may also be absent.'
-        }
-    }
-    elseif (-not $State.TPM.Ready) {
-        $items += [pscustomobject]@{
-            Item = 'TPM / Security Processor'
-            Current = 'Present, but not ready'
-            Needed = 'Windows cannot fully use the security processor in the current state.'
-            Action = 'Check TPM/firmware status and Windows TPM management. This tool will never clear the TPM.'
-        }
-    }
-
-    if (-not $State.HardwareCapabilities.DMACapability) {
-        $dmaAction = 'Check whether the platform supports Kernel DMA Protection / IOMMU.'
-        if (-not $State.Virtualization.VirtualizationFirmwareEnabled) {
-            $dmaAction = 'Enable CPU virtualization and Intel VT-d / AMD IOMMU in UEFI/BIOS, then re-check.'
-        }
-        else {
-            $dmaAction = 'If available in firmware, enable Intel VT-d / AMD IOMMU. Some platforms do not support Kernel DMA Protection.'
-        }
-        $items += [pscustomobject]@{
-            Item = 'Kernel DMA / Memory Access Protection'
-            Current = 'DMA protection capability not reported by Device Guard'
-            Needed = 'Protects memory from DMA-capable external peripherals on supported hardware.'
-            Action = $dmaAction
-        }
-    }
-
-    # Native PowerShell arrays are used here for Windows PowerShell 5.1 compatibility.
-    Write-DebugLog ('Get-FirmwareActions: END; items={0}' -f $items.Count)
-    return $items
-}
-
-function Get-QuickSummary {
-    param([Parameter(Mandatory=$true)]$State)
-    Write-DebugLog 'Get-QuickSummary: BEGIN'
-    $rows = @()
-
-    if ($State.TPM.Present -and $State.TPM.Ready) {
-        $version = if ($State.TPM.SpecVersion) { $State.TPM.SpecVersion } else { 'version unknown' }
-        $rows += [pscustomobject]@{Name='Security processor (TPM)';Status=('Ready - {0}' -f $version);Kind='Good';Next=''}
-    }
-    elseif ($State.TPM.Present) {
-        $rows += [pscustomobject]@{Name='Security processor (TPM)';Status='Present but not ready';Kind='Warn';Next='Check TPM status. Do not clear it as a generic fix.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Security processor (TPM)';Status='Not visible to Windows';Kind='Warn';Next='Check Intel PTT / AMD fTPM / TPM setting in UEFI/BIOS.'}
-    }
-
-    if ($State.Firmware.SecureBootSupported -and $State.Firmware.SecureBootEnabled) {
-        $rows += [pscustomobject]@{Name='Secure Boot';Status='ON';Kind='Good';Next=''}
-    }
-    elseif ($State.Firmware.SecureBootSupported) {
-        $rows += [pscustomobject]@{Name='Secure Boot';Status='OFF - firmware action required';Kind='Warn';Next='Enable Secure Boot in UEFI firmware.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Secure Boot';Status='Unavailable / Legacy or unsupported';Kind='Warn';Next='Check UEFI/Legacy boot mode and platform support.'}
-    }
-
-    if ($State.Virtualization.VirtualizationFirmwareEnabled) {
-        $rows += [pscustomobject]@{Name='CPU virtualization';Status='ON';Kind='Good';Next=''}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='CPU virtualization';Status='OFF or not reported';Kind='Warn';Next='Enable Intel VT-x or AMD SVM/AMD-V in UEFI/BIOS.'}
-    }
-
-    if ($State.VBS.StatusCode -eq 2) {
-        $rows += [pscustomobject]@{Name='Virtualization-based security';Status='RUNNING';Kind='Good';Next=''}
-    }
-    elseif ($State.VBS.StatusCode -eq 1) {
-        $rows += [pscustomobject]@{Name='Virtualization-based security';Status='Configured, not running';Kind='Warn';Next='Restart and check firmware prerequisites.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Virtualization-based security';Status='OFF / not configured';Kind='Info';Next='Enable Memory Integrity to configure the recommended VBS baseline.'}
-    }
-
-    $mi = $State.Features.MemoryIntegrity
-    if ($mi.Running) {
-        $rows += [pscustomobject]@{Name='Memory Integrity / HVCI';Status='RUNNING';Kind='Good';Next=''}
-    }
-    elseif ($mi.Configured) {
-        $rows += [pscustomobject]@{Name='Memory Integrity / HVCI';Status='Configured, not running';Kind='Warn';Next='Restart; if still off, review BIOS virtualization and incompatible drivers.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Memory Integrity / HVCI';Status='OFF / not configured';Kind='Info';Next='This tool can enable it.'}
-    }
-
-    $sg = $State.Features.SecureLaunch
-    if ($sg.Running) {
-        $rows += [pscustomobject]@{Name='Firmware protection / Secure Launch';Status='RUNNING';Kind='Good';Next=''}
-    }
-    elseif ($sg.Configured) {
-        $rows += [pscustomobject]@{Name='Firmware protection / Secure Launch';Status='Configured, not running';Kind='Warn';Next='Restart and verify platform/firmware prerequisites.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Firmware protection / Secure Launch';Status='OFF / not configured';Kind='Info';Next='This tool can configure it if baseline prerequisites are present.'}
-    }
-
-    $cg = $State.Features.CredentialGuard
-    if ($cg.Running) {
-        $rows += [pscustomobject]@{Name='Credential Guard';Status='RUNNING';Kind='Good';Next=''}
-    }
-    elseif ($cg.Configured) {
-        $rows += [pscustomobject]@{Name='Credential Guard';Status='Configured, not running';Kind='Warn';Next='Restart and verify VBS/Secure Boot requirements.'}
-    }
-    elseif ($cg.EditionSupported) {
-        $rows += [pscustomobject]@{Name='Credential Guard';Status='OFF - advanced optional';Kind='Info';Next='Can be enabled separately after authentication compatibility review.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Credential Guard';Status='Local enable action unavailable for this edition';Kind='Unavailable';Next='Audit only; WinDSH enables Credential Guard only on supported Enterprise/Education editions.'}
-    }
-
-    $ks = $State.Features.KernelStackProtection
-    if ($ks.Running) {
-        $rows += [pscustomobject]@{Name='Kernel hardware stack protection';Status='RUNNING';Kind='Good';Next=''}
-    }
-    elseif ($ks.AuditMode) {
-        $rows += [pscustomobject]@{Name='Kernel hardware stack protection';Status='AUDIT MODE';Kind='Warn';Next='Review Windows Security Core isolation before enforcing.'}
-    }
-    elseif ($ks.Configured) {
-        $rows += [pscustomobject]@{Name='Kernel hardware stack protection';Status='Configured, not running';Kind='Warn';Next='Restart and check CPU/driver support.'}
-    }
-    elseif ($ks.WindowsVersionEligible) {
-        $rows += [pscustomobject]@{Name='Kernel hardware stack protection';Status='Not configured / support depends on CPU';Kind='Info';Next='Use Windows Security Core isolation if Windows exposes the switch.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Kernel hardware stack protection';Status='Not available on this Windows build';Kind='Unavailable';Next=''}
-    }
-
-    if ($State.HardwareCapabilities.DMACapability) {
-        $rows += [pscustomobject]@{Name='Kernel DMA / Memory Access';Status='Platform capability reported';Kind='Good';Next='Windows manages this automatically on supported hardware.'}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='Kernel DMA / Memory Access';Status='Capability not reported';Kind='Warn';Next='Check VT-d/IOMMU in firmware and platform support.'}
-    }
-
-    if ($State.DEP.Available -eq $true -or $State.HardwareCapabilities.NXAvailable) {
-        $rows += [pscustomobject]@{Name='DEP / NX';Status='Available';Kind='Good';Next=''}
-    }
-    else {
-        $rows += [pscustomobject]@{Name='DEP / NX';Status='Not reported available';Kind='Warn';Next='Check platform/firmware support.'}
-    }
-
-    # Native PowerShell arrays avoid collection binder differences in Windows PowerShell 5.1.
-    Write-DebugLog ('Get-QuickSummary: END; rows={0}' -f $rows.Count)
-    return $rows
-}
-
-function Show-State {
-    param([Parameter(Mandatory=$true)]$State)
-
-    Write-Section 'Windows Device Security - Easy Summary'
-    Write-Host ('Computer : {0} - {1} {2}' -f $State.Computer.Name,$State.Computer.Manufacturer,$State.Computer.Model) -ForegroundColor Gray
-    Write-Host ('Windows  : {0} {1} ({2}, build {3})' -f $State.Computer.ProductName,$State.Computer.DisplayVersion,$State.Computer.EditionID,$State.Computer.Build) -ForegroundColor Gray
-    Write-Host ('Firmware : {0}' -f $State.Firmware.Type) -ForegroundColor Gray
-    if ($script:IntegrityState) {
-        $integrityColor = if ($script:IntegrityState.Status -eq 'OK') { 'Green' } else { 'Yellow' }
-        Write-Host ('Integrity: {0} (accidental-corruption check)' -f $script:IntegrityState.Status) -ForegroundColor $integrityColor
-    }
-    if ($State.VirtualMachine -and $State.VirtualMachine.Detected) {
-        Write-Host ''
-        Write-Host ('[INFO] Virtual machine detected: {0}' -f $State.VirtualMachine.PlatformHint) -ForegroundColor Yellow
-        Write-Host '       TPM, Secure Boot and other hardware-security capabilities may be virtualized and depend on the hypervisor configuration.' -ForegroundColor DarkYellow
-    }
-    Write-Host ''
-    Write-Host 'Meaning of labels: [OK] protected/available, [ACTION] needs attention, [N/A] unavailable, [INFO] informational.' -ForegroundColor DarkGray
-    Write-Host ''
-
-    Write-DebugLog 'Show-State: rendering Easy Summary rows'
-    foreach ($row in (Get-QuickSummary -State $State)) {
-        Write-SummaryItem -Name $row.Name -Status $row.Status -Kind $row.Kind -NextStep $row.Next
-    }
-
-    Write-DebugLog 'Show-State: collecting BIOS/UEFI actions'
-    $firmwareActions = @(Get-FirmwareActions -State $State)
-    Write-SubSection 'BIOS / UEFI items'
-    if (@($firmwareActions).Count -eq 0) {
-        Write-Host 'No obvious firmware action is required from the checks available to this script.' -ForegroundColor Green
-    }
-    else {
-        $n = 1
-        foreach ($item in $firmwareActions) {
-            Write-Host ('{0}. {1}' -f $n,$item.Item) -ForegroundColor Yellow
-            Write-Host ('   Current : {0}' -f $item.Current) -ForegroundColor Gray
-            Write-Host ('   Why     : {0}' -f $item.Needed) -ForegroundColor DarkGray
-            Write-Host ('   Action  : {0}' -f $item.Action) -ForegroundColor Yellow
-            $n++
-        }
-    }
-
-    $unsupported = @(Get-UnsupportedCapabilities -State $State)
-    Write-SubSection 'Unavailable / not-confirmed capabilities'
-    if ($unsupported.Count -eq 0) {
-        Write-Host 'No unavailable capability was identified by the checks WinDSH can make.' -ForegroundColor Green
-    }
-    else {
-        foreach ($item in $unsupported) {
-            Write-Host ('[N/A] {0}: {1}' -f $item.Feature,$item.Status) -ForegroundColor DarkGray
-            Write-Host ('      {0}' -f $item.Reason) -ForegroundColor DarkGray
-        }
-    }
-
-    Write-SubSection 'Technical details'
-    Write-StatusLine 'Firmware type' $State.Firmware.Type
-    Write-StatusLine 'Secure Boot supported' ([string]$State.Firmware.SecureBootSupported)
-    Write-StatusLine 'Secure Boot enabled' ([string]$State.Firmware.SecureBootEnabled) $(if ($State.Firmware.SecureBootEnabled) {'Good'} else {'Warn'})
-    Write-StatusLine 'TPM present' ([string]$State.TPM.Present) $(if ($State.TPM.Present) {'Good'} else {'Warn'})
-    Write-StatusLine 'TPM ready' ([string]$State.TPM.Ready) $(if ($State.TPM.Ready) {'Good'} else {'Warn'})
-    Write-StatusLine 'TPM specification' $(if ($State.TPM.SpecVersion) {$State.TPM.SpecVersion} else {'Unknown'})
-    Write-StatusLine 'Virtualization enabled in firmware' ([string]$State.Virtualization.VirtualizationFirmwareEnabled) $(if ($State.Virtualization.VirtualizationFirmwareEnabled) {'Good'} else {'Warn'})
-    Write-StatusLine 'CPU VM monitor extensions reported' ([string]$State.Virtualization.VMMonitorModeExtensions)
-    Write-StatusLine 'Hypervisor present' ([string]$State.Virtualization.HypervisorPresent)
-    Write-StatusLine 'SLAT' ([string]$State.Virtualization.SLATAssessment)
-    Write-StatusLine 'Kernel DMA capability (Device Guard)' ([string]$State.HardwareCapabilities.DMACapability) $(if ($State.HardwareCapabilities.DMACapability) {'Good'} else {'Warn'})
-    Write-StatusLine 'Secure memory overwrite capability' ([string]$State.HardwareCapabilities.SecureMemoryOverwrite)
-    Write-StatusLine 'NX capability (Device Guard)' ([string]$State.HardwareCapabilities.NXAvailable)
-    Write-StatusLine 'DEP available (Win32_OperatingSystem)' ([string]$State.DEP.Available)
-    Write-StatusLine 'DEP enabled for drivers' ([string]$State.DEP.Drivers)
-    Write-StatusLine 'DEP enabled for 32-bit applications' ([string]$State.DEP.Applications32Bit)
-    Write-StatusLine 'SMM mitigations (Device Guard)' ([string]$State.HardwareCapabilities.SMMMitigations)
-    Write-StatusLine 'MBEC / GMET (Device Guard)' ([string]$State.HardwareCapabilities.MBECorGMET)
-    Write-StatusLine 'APIC virtualization (Device Guard)' ([string]$State.HardwareCapabilities.APICVirtualization)
-
-    Write-Host ''
-    Write-StatusLine 'VBS' $State.VBS.Status $(if ($State.VBS.StatusCode -eq 2) {'Good'} elseif ($State.VBS.StatusCode -eq 1) {'Warn'} else {'Info'})
-
-    $mi = $State.Features.MemoryIntegrity
-    $miText = if ($mi.Running) {'RUNNING'} elseif ($mi.Configured) {'CONFIGURED - NOT RUNNING'} else {'DISABLED / NOT CONFIGURED'}
-    Write-StatusLine 'Memory Integrity / HVCI' $miText $(if ($mi.Running) {'Good'} elseif ($mi.Configured) {'Warn'} else {'Info'})
-    Write-StatusLine '  HVCI registry Enabled' ([string]$mi.RegistryEnabled)
-    Write-StatusLine '  HVCI managed by policy' ([string]$mi.ManagedByPolicy)
-
-    $sg = $State.Features.SecureLaunch
-    $sgText = if ($sg.Running) {'RUNNING'} elseif ($sg.Configured) {'CONFIGURED - NOT RUNNING'} else {'DISABLED / NOT CONFIGURED'}
-    Write-StatusLine 'System Guard Secure Launch' $sgText $(if ($sg.Running) {'Good'} elseif ($sg.Configured) {'Warn'} else {'Info'})
-    Write-StatusLine '  Secure Launch managed by policy' ([string]$sg.ManagedByPolicy)
-
-    $cg = $State.Features.CredentialGuard
-    $cgText = if ($cg.Running) {'RUNNING'} elseif ($cg.Configured) {'CONFIGURED - NOT RUNNING'} else {'DISABLED / NOT CONFIGURED'}
-    Write-StatusLine 'Credential Guard' $cgText $(if ($cg.Running) {'Good'} elseif ($cg.Configured) {'Warn'} else {'Info'})
-    Write-StatusLine '  Credential Guard edition supported' ([string]$cg.EditionSupported)
-    Write-StatusLine '  LsaCfgFlags' ([string]$cg.LsaCfgFlags)
-    Write-StatusLine '  Credential Guard managed by policy' ([string]$cg.ManagedByPolicy)
-
-    $smm = $State.Features.SMMFirmwareMeasurement
-    $smmText = if ($smm.Running) {'RUNNING'} elseif ($smm.Configured) {'CONFIGURED - NOT RUNNING'} else {'NOT RUNNING / NOT CONFIGURED'}
-    Write-StatusLine 'SMM Firmware Measurement' $smmText $(if ($smm.Running) {'Good'} else {'Info'})
-
-    $ks = $State.Features.KernelStackProtection
-    $ksText = if ($ks.Running) {'RUNNING'} elseif ($ks.AuditMode) {'AUDIT MODE'} elseif ($ks.Configured) {'CONFIGURED - NOT RUNNING'} elseif ($ks.WindowsVersionEligible) {'NOT CONFIGURED / HARDWARE SUPPORT UNKNOWN'} else {'NOT AVAILABLE ON THIS WINDOWS VERSION'}
-    Write-StatusLine 'Kernel Hardware Stack Protection' $ksText $(if ($ks.Running) {'Good'} elseif ($ks.Configured -or $ks.AuditMode) {'Warn'} else {'Info'})
-
-    $hp = $State.Features.HypervisorEnforcedPagingTranslation
-    $hpText = if ($hp.Running) {'RUNNING'} elseif ($hp.Configured) {'CONFIGURED - NOT RUNNING'} else {'NOT REPORTED AS RUNNING'}
-    Write-StatusLine 'Hypervisor-Enforced Paging Translation' $hpText $(if ($hp.Running) {'Good'} else {'Info'})
-
-    Write-StatusLine 'Vulnerable Driver Blocklist' $State.Features.VulnerableDriverBlocklist.EffectiveAssessment $(if ($State.Features.VulnerableDriverBlocklist.EffectiveAssessment -match 'Enabled|Enforced|default is enabled') {'Good'} else {'Warn'})
-    Write-StatusLine 'Windows pending restart detected' ([string]$State.Restart.Pending) $(if ($State.Restart.Pending) {'Warn'} else {'Info'})
-
-    if ($mi.ManagedByPolicy -or $sg.ManagedByPolicy -or $cg.ManagedByPolicy) {
-        Write-Host ''
-        Write-Host 'NOTICE: One or more settings are policy-managed. The tool will not intentionally override those policy values.' -ForegroundColor Yellow
-    }
-}
-function Confirm-Action {
-    param(
-        [Parameter(Mandatory=$true)][string]$Prompt,
-        [string]$RequiredWord = 'Y',
-        [switch]$DefaultYes
-    )
-    $answer = Read-Host $Prompt
-    if ([string]::IsNullOrWhiteSpace($answer) -and $DefaultYes) { return $true }
-    return ($answer.Trim() -ieq $RequiredWord)
-}
-
-function Get-HvciDiagnostics {
-    param(
-        [int]$LookbackDays = 14,
-        [int]$MaxEventsPerLog = 80
-    )
-
-    $startTime = (Get-Date).AddDays(-1 * [Math]::Abs($LookbackDays))
-    $logs = @('Microsoft-Windows-CodeIntegrity/Operational','Microsoft-Windows-DeviceGuard/Operational')
-    $logStatus = @()
-    $events = @()
-    $driverPaths = @()
-
-    foreach ($logName in $logs) {
+    foreach ($log in $logs) {
         try {
-            $rawEvents = @(Get-WinEvent -FilterHashtable @{LogName=$logName; StartTime=$startTime} -MaxEvents $MaxEventsPerLog -ErrorAction Stop)
-            $logStatus += [pscustomobject]@{ LogName=$logName; Available=$true; Error=$null }
-            foreach ($event in $rawEvents) {
-                $message = [string]$event.Message
-                $propertyText = ''
-                try { $propertyText = (@($event.Properties | ForEach-Object { [string]$_.Value }) -join ' ') }
-                catch { Write-DebugException -Stage ('Read event properties: {0}/{1}' -f $logName,$event.Id) -ErrorRecord $_ }
-                $combined = ($message + ' ' + $propertyText)
-
-                $isCompatibility = ($logName -eq 'Microsoft-Windows-CodeIntegrity/Operational' -and [int]$event.Id -eq 3087)
-                $isRelated = [bool]($combined -match '(?i)HVCI|memory integrity|hypervisor.?protected code integrity|hypervisor.?enforced code integrity|incompatible.{0,40}driver|driver.{0,40}incompatible')
-                if (-not $isCompatibility -and -not $isRelated) { continue }
-
-                # Extract only file names/paths Windows actually placed in the event data.
-                $matches = [regex]::Matches($combined,'(?i)(?:[A-Z]:\\|\\\\\?\\|\\Device\\)[^\r\n"''<>|]*?\.sys\b|\b[A-Za-z0-9_.-]+\.sys\b')
-                foreach ($m in $matches) {
-                    $value = $m.Value.Trim()
-                    if (-not [string]::IsNullOrWhiteSpace($value) -and -not ($driverPaths -contains $value)) { $driverPaths += $value }
-                }
-
-                $cleanMessage = ($message -replace '[\r\n]+',' ').Trim()
-                if ($cleanMessage.Length -gt 700) { $cleanMessage = $cleanMessage.Substring(0,700) + '...' }
-                $events += [pscustomobject]@{
-                    TimeCreated = $event.TimeCreated
-                    LogName = $logName
-                    Id = [int]$event.Id
-                    Level = [string]$event.LevelDisplayName
-                    CompatibilityEvent3087 = $isCompatibility
-                    Message = $cleanMessage
-                }
-                if ($events.Count -ge 25) { break }
+            $events = @(Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $start; Id = $EventIds } `
+                        -MaxEvents $MaxEvents -ErrorAction Stop)
+            $result.LogAvailable = $true
+            $result.Queried = $true
+            foreach ($e in $events) {
+                $result.EventCount++
+                if ($null -eq $result.Newest -or $e.TimeCreated -gt $result.Newest) { $result.Newest = $e.TimeCreated }
+                $messages += [string](Get-PropertySafe $e 'Message' '')
             }
         }
         catch {
-            Write-DebugException -Stage ('Read HVCI event log {0}' -f $logName) -ErrorRecord $_
-            $logStatus += [pscustomobject]@{ LogName=$logName; Available=$false; Error=$_.Exception.Message }
+            # "No events were found" is a normal, healthy outcome, not an error.
+            if ($_.Exception.Message -match 'No events were found') { $result.Queried = $true; $result.LogAvailable = $true }
+            else { $result.Error = $_.Exception.Message; Write-DebugError ('Read {0}' -f $log) $_ }
         }
     }
 
-    $compatEvents = @($events | Where-Object { $_.CompatibilityEvent3087 })
-    $assessment = if ($compatEvents.Count -gt 0) {
-        'Recent Code Integrity Event ID 3087 compatibility events were found. Review the referenced drivers before broad HVCI deployment.'
-    }
-    elseif ($events.Count -gt 0) {
-        'Related Code Integrity/Device Guard events were found, but no recent Event ID 3087 compatibility event was collected.'
-    }
-    else {
-        'No recent HVCI-related events were collected. This does not prove that every installed third-party driver is compatible.'
+    $names = @()
+    foreach ($message in $messages) {
+        foreach ($m in [regex]::Matches($message, '[A-Za-z0-9_\-\.]+\.sys')) {
+            $name = $m.Value
+            if ($names -notcontains $name) { $names += $name }
+        }
     }
 
-    $result = [pscustomobject]@{
-        CollectedAt = (Get-Date).ToString('s')
-        LookbackDays = $LookbackDays
-        Assessment = $assessment
-        CompatibilityEventCount = $compatEvents.Count
-        RelatedEventCount = @($events).Count
-        CandidateDriverReferences = @($driverPaths)
-        Logs = @($logStatus)
-        Events = @($events)
+    $drivers = @()
+    foreach ($name in $names) {
+        $drivers += (Resolve-DriverDetail -FileName $name)
     }
-    $script:LastHvciDiagnostics = $result
+    $result.Drivers = $drivers
     return $result
 }
 
-function Show-HvciDiagnostics {
-    param([Parameter(Mandatory=$true)]$Diagnostics)
-    Write-SubSection 'Memory Integrity / HVCI driver diagnostics'
-    Write-Host $Diagnostics.Assessment -ForegroundColor $(if ($Diagnostics.CompatibilityEventCount -gt 0) {'Yellow'} else {'Gray'})
-    Write-Host ('Lookback window: {0} days; compatibility events (3087): {1}; related events: {2}' -f $Diagnostics.LookbackDays,$Diagnostics.CompatibilityEventCount,$Diagnostics.RelatedEventCount) -ForegroundColor DarkGray
+function Resolve-DriverDetail {
+    <# Turns a bare .sys filename into something a person can act on. #>
+    param([Parameter(Mandatory = $true)][string]$FileName)
 
-    foreach ($log in $Diagnostics.Logs) {
-        if (-not $log.Available) { Write-Host ('Log unavailable: {0} ({1})' -f $log.LogName,$log.Error) -ForegroundColor DarkGray }
+    $detail = [pscustomobject]@{
+        FileName = $FileName
+        Path = $null
+        Publisher = $null
+        Version = $null
+        Service = $null
+        Found = $false
     }
-    if (@($Diagnostics.CandidateDriverReferences).Count -gt 0) {
-        Write-Host 'Driver/file references reported by Windows events:' -ForegroundColor Yellow
-        foreach ($driver in $Diagnostics.CandidateDriverReferences) { Write-Host ('  - {0}' -f $driver) -ForegroundColor Yellow }
+
+    $candidates = @(
+        (Join-Path $env:SystemRoot ('System32\drivers\' + $FileName))
+        (Join-Path $env:SystemRoot ('System32\' + $FileName))
+        (Join-Path $env:SystemRoot ('SysWOW64\drivers\' + $FileName))
+    )
+    foreach ($candidate in $candidates) {
+        try {
+            if (Test-Path -LiteralPath $candidate) {
+                $detail.Path = $candidate
+                $detail.Found = $true
+                $item = Get-Item -LiteralPath $candidate -ErrorAction Stop
+                $detail.Version = [string](Get-PropertySafe $item.VersionInfo 'FileVersion' $null)
+                $product = [string](Get-PropertySafe $item.VersionInfo 'CompanyName' $null)
+                if ($product) { $detail.Publisher = $product }
+                break
+            }
+        }
+        catch { Write-DebugError ('Inspect driver {0}' -f $candidate) $_ }
+    }
+
+    if ($detail.Found -and -not $detail.Publisher) {
+        try {
+            $sig = Get-AuthenticodeSignature -LiteralPath $detail.Path -ErrorAction Stop
+            if ($sig -and $sig.SignerCertificate) { $detail.Publisher = $sig.SignerCertificate.Subject }
+        }
+        catch { Write-DebugError 'Read driver signature' $_ }
+    }
+
+    try {
+        $base = [IO.Path]::GetFileNameWithoutExtension($FileName)
+        $svc = Get-CimInstance -ClassName Win32_SystemDriver -Filter ("Name='{0}'" -f $base) -ErrorAction Stop
+        if ($svc) { $detail.Service = [string](Get-PropertySafe $svc 'DisplayName' $base) }
+    }
+    catch { Write-DebugError 'Resolve driver service' $_ }
+
+    return $detail
+}
+
+function Get-PendingRestartState {
+    # Component Based Servicing and Windows Update are authoritative.
+    # PendingFileRenameOperations is NOT: Windows, installers and antivirus queue file
+    # renames constantly, so keying off its existence reported a pending restart on
+    # essentially every healthy machine. Collected for diagnostics only.
+    $cbs = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+    $wu = Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+
+    $queued = 0
+    try {
+        $value = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name 'PendingFileRenameOperations'
+        if ($null -ne $value) {
+            $queued = @(ConvertTo-Array $value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count
+        }
+    }
+    catch { Write-DebugError 'Read PendingFileRenameOperations' $_ }
+
+    $reasons = @()
+    if ($cbs) { $reasons += 'Windows servicing has a restart pending.' }
+    if ($wu) { $reasons += 'Windows Update has a restart pending.' }
+
+    return [pscustomobject]@{
+        Pending = [bool]($cbs -or $wu)
+        Reasons = $reasons
+        ComponentBasedServicing = [bool]$cbs
+        WindowsUpdate = [bool]$wu
+        QueuedFileRenameCount = $queued
+    }
+}
+
+function Get-PolicyState {
+    <#
+        Reads the Group Policy hive. READ ONLY - WinDSH never writes here.
+        Used both to back off from GPO-managed values and to evaluate CIS compliance,
+        because CIS section 18.9.5 audits this hive rather than the local one.
+    #>
+    $values = @{}
+    foreach ($control in $script:ControlCatalog) {
+        foreach ($pv in (ConvertTo-Array $control.PolicyValues)) {
+            if (-not $values.ContainsKey($pv.Name)) {
+                $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+            }
+        }
+    }
+    return [pscustomobject]@{
+        Path = $script:RegPolicyDG
+        Values = $values
+        AnyConfigured = [bool](@($values.Values | Where-Object { $null -ne $_ }).Count -gt 0)
+    }
+}
+
+function Get-StaticState {
+    <# Collected once. Nothing here can change while WinDSH is running. #>
+    if ($null -ne $script:StaticState) { return $script:StaticState }
+    Write-Debug-Log 'Collecting static state'
+    $computer = Get-OsAndHardwareState
+    $virtualization = Get-VirtualizationState
+    $script:StaticState = [pscustomobject]@{
+        Computer = $computer
+        Firmware = Get-FirmwareState
+        Tpm = Get-TpmState
+        Virtualization = $virtualization
+        HypervisorLaunch = Get-HypervisorLaunchState
+        Dep = Get-DepState
+        VirtualMachine = Get-VirtualMachineAssessment -Computer $computer -Virtualization $virtualization
+    }
+    return $script:StaticState
+}
+
+function Get-SystemState {
+    <#
+        Full state. Pass -Volatile to re-read only what a configuration change can affect,
+        reusing the cached static facts.
+    #>
+    param([switch]$Volatile)
+
+    if (-not $Volatile) { $script:StaticState = $null }
+    $static = Get-StaticState
+    Write-Debug-Log ('Collecting volatile state (volatile-only={0})' -f [bool]$Volatile)
+
+    return [pscustomobject]@{
+        Generated = (Get-Date).ToUniversalTime().ToString('o')
+        Computer = $static.Computer
+        Firmware = $static.Firmware
+        Tpm = $static.Tpm
+        Virtualization = $static.Virtualization
+        HypervisorLaunch = $static.HypervisorLaunch
+        Dep = $static.Dep
+        VirtualMachine = $static.VirtualMachine
+        DeviceGuard = Get-DeviceGuardState
+        Policy = Get-PolicyState
+        Restart = Get-PendingRestartState
+    }
+}
+
+# ===== 40-evaluate.ps1 =====
+# ---------------------------------------------------------------------------
+# Evaluation engine.
+#
+# One status function for every control, one explainer for every control, one score.
+# v1 had a hand-written diagnostic per feature; adding a feature meant writing another.
+# ---------------------------------------------------------------------------
+
+function Get-ControlRunningState {
+    <#
+        Maps a control to the Win32_DeviceGuard service identifiers.
+        SecurityServicesConfigured / Running: 1 Credential Guard, 2 HVCI,
+        3 System Guard Secure Launch, 4 SMM firmware measurement,
+        5 kernel shadow stacks, 6 kernel shadow stacks (audit), 7 HVPT.
+    #>
+    param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
+
+    $dg = $State.DeviceGuard
+    switch ($Control.DetectKey) {
+        'Vbs' {
+            return [pscustomobject]@{
+                Running = [bool]($dg.VbsStatusCode -eq 2)
+                RunningKnown = [bool]($null -ne $dg.VbsStatusCode)
+            }
+        }
+        'Hvci' {
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $dg.Available }
+        }
+        'CredentialGuard' {
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $dg.Available }
+        }
+        'SecureLaunch' {
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $dg.Available }
+        }
+        'KernelShadowStacks' {
+            return [pscustomobject]@{
+                Running = ((Test-Contains $dg.Running 5) -or (Test-Contains $dg.Running 6))
+                RunningKnown = $dg.Available
+            }
+        }
+        'Hvpt' {
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $dg.Available }
+        }
+        'SmmFirmware' {
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $dg.Available }
+        }
+        'Dep' {
+            return [pscustomobject]@{ Running = [bool]$State.Dep.Enabled; RunningKnown = [bool]($null -ne $State.Dep.SupportPolicy) }
+        }
+        default {
+            # Registry-only controls have no separate running signal: configured is running.
+            return [pscustomobject]@{ Running = $null; RunningKnown = $false }
+        }
+    }
+}
+
+function Test-ControlConfigured {
+    param([Parameter(Mandatory = $true)]$Control)
+    # A detection-only control has no values to write. Without this guard the loop below
+    # would not execute and it would report as configured on every machine.
+    if (Get-PropertySafe $Control 'DetectionOnly' $false) { return $false }
+    $all = $true
+    foreach ($value in (ConvertTo-Array $Control.LocalValues)) {
+        $current = Get-RegValue -Path $value.Path -Name $value.Name
+        if ($null -eq $current) { $all = $false; break }
+        $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
+        if ($comparison -eq 'AtLeast') { if ([int]$current -lt [int]$value.Value) { $all = $false; break } }
+        else { if ([int]$current -ne [int]$value.Value) { $all = $false; break } }
+    }
+    return $all
+}
+
+function Get-ControlPolicyOverride {
+    param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
+    foreach ($pv in (ConvertTo-Array $Control.PolicyValues)) {
+        if ($State.Policy.Values.ContainsKey($pv.Name)) {
+            $value = $State.Policy.Values[$pv.Name]
+            if ($null -ne $value) {
+                return [pscustomobject]@{ Name = $pv.Name; Value = $value; Path = $State.Policy.Path }
+            }
+        }
+    }
+    return $null
+}
+
+function Get-ControlSupport {
+    <#
+        Hard prerequisites the machine itself imposes. Returns the FIRST blocking reason so
+        the user is given one thing to act on rather than a checklist.
+    #>
+    param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
+
+    if (-not $State.Computer.Is64Bit) {
+        return [pscustomobject]@{ Supported = $false; Reason = 'These protections require a 64-bit version of Windows.'; Fix = $null }
+    }
+    $minBuild = Get-PropertySafe $Control 'MinimumBuild' $null
+    if ($null -ne $minBuild -and $State.Computer.BuildNumber -gt 0 -and $State.Computer.BuildNumber -lt [int]$minBuild) {
+        return [pscustomobject]@{
+            Supported = $false
+            Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber)
+            Fix = 'Update Windows to a newer feature release.'
+        }
+    }
+
+    if ($Control.Category -ne 'Kernel' -or $Control.Id -ne 'driver-blocklist') {
+        if ($Control.Id -ne 'driver-blocklist') {
+            if ($State.HypervisorLaunch.BlocksVbs) {
+                return [pscustomobject]@{
+                    Supported = $false
+                    Reason = 'The Windows hypervisor is switched off in the boot configuration, so no protection of this kind can start.'
+                    Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.'
+                }
+            }
+            if (-not $State.Firmware.IsUefiConfirmed) {
+                return [pscustomobject]@{
+                    Supported = $false
+                    Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode)
+                    Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.'
+                }
+            }
+            if (-not $State.Virtualization.FirmwareEnabled) {
+                return [pscustomobject]@{
+                    Supported = $false
+                    Reason = 'CPU virtualization is turned off in firmware.'
+                    Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.'
+                }
+            }
+        }
+    }
+
+    if ($Control.Id -eq 'secure-launch' -and -not $State.Tpm.IsTPM2) {
+        return [pscustomobject]@{
+            Supported = $false
+            Reason = 'TPM 2.0 was not confirmed, and Secure Launch needs it to store boot measurements.'
+            Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.'
+        }
+    }
+
+    if ($Control.Id -eq 'credential-guard') {
+        $edition = [string]$State.Computer.EditionId
+        if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
+            return [pscustomobject]@{
+                Supported = $false
+                Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition)
+                Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.'
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Supported = $true; Reason = $null; Fix = $null }
+}
+
+function Get-ControlPreflight {
+    <#
+        Evaluates a control's declared pre-flight safety check. Returns $null when the
+        control has none. A tripped check means applying the control now is risky, not
+        that it is unsupported.
+    #>
+    param([Parameter(Mandatory = $true)]$Control)
+
+    $preflight = Get-PropertySafe $Control 'Preflight' $null
+    if ($null -eq $preflight) { return $null }
+
+    switch ($preflight.Kind) {
+        'CodeIntegrityEvents' {
+            $ids = ConvertTo-Array $preflight.EventIds
+            $days = if ($preflight.ContainsKey('LookbackDays')) { [int]$preflight.LookbackDays } else { 14 }
+            $events = Get-CodeIntegrityEvents -EventIds $ids -LookbackDays $days
+
+            return [pscustomobject]@{
+                Kind = $preflight.Kind
+                Tripped = [bool]($events.EventCount -gt 0)
+                BlocksSafeSet = [bool]$preflight.BlocksSafeSet
+                Message = $preflight.Message
+                EventCount = $events.EventCount
+                Drivers = $events.Drivers
+                Newest = $events.Newest
+                Queried = $events.Queried
+                Error = $events.Error
+            }
+        }
+        default { return $null }
+    }
+}
+
+function Get-ControlStatus {
+    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State)
+
+    $control = Get-Control -Id $Id
+    $support = Get-ControlSupport -Control $control -State $State
+    $policy = Get-ControlPolicyOverride -Control $control -State $State
+    $configured = Test-ControlConfigured -Control $control
+    $run = Get-ControlRunningState -Control $control -State $State
+
+    $running = if ($run.RunningKnown) { [bool]$run.Running } else { $configured }
+
+    # NOT named $state: PowerShell variable names are case-insensitive, so a local
+    # $state would shadow the $State parameter and the recursive dependency call below
+    # would receive this string instead of the system state object.
+    $controlState = if (-not $support.Supported) { 'NotSupported' }
+                    elseif ($running) { 'Running' }
+                    elseif ($configured) { 'ConfiguredNotRunning' }
+                    else { 'NotConfigured' }
+
+    # A dependency that is not running explains a child that is not running.
+    $blockedBy = $null
+    if ($controlState -ne 'Running' -and $controlState -ne 'NotSupported') {
+        foreach ($dep in (ConvertTo-Array $control.Requires)) {
+            $depStatus = Get-ControlStatus -Id $dep -State $State
+            if ($depStatus.State -ne 'Running') { $blockedBy = $depStatus; break }
+        }
+    }
+
+    return [pscustomobject]@{
+        Id = $control.Id
+        Name = $control.Name
+        PlainName = $control.PlainName
+        Category = $control.Category
+        Weight = $control.Weight
+        State = $controlState
+        Running = $running
+        Configured = $configured
+        Supported = $support.Supported
+        SupportReason = $support.Reason
+        SupportFix = $support.Fix
+        ManagedByPolicy = [bool]($null -ne $policy)
+        PolicyValue = if ($policy) { $policy.Value } else { $null }
+        BlockedBy = $blockedBy
+        Cis = $control.Cis
+    }
+}
+
+function Get-AllControlStatus {
+    param([Parameter(Mandatory = $true)]$State)
+    $results = @()
+    foreach ($id in (Get-ControlIds)) { $results += Get-ControlStatus -Id $id -State $State }
+    return $results
+}
+
+# ---------------------------------------------------------------------------
+# Scoring
+# ---------------------------------------------------------------------------
+
+function Get-SecurityScore {
+    <#
+        Weighted score over the controls this machine can actually run. Controls the
+        hardware cannot support are excluded from the denominator rather than counted as
+        failures: penalising someone for hardware they cannot change is not useful.
+    #>
+    param([Parameter(Mandatory = $true)]$Statuses)
+
+    $earned = 0.0
+    $possible = 0.0
+    $breakdown = @()
+
+    foreach ($s in $Statuses) {
+        $fraction = switch ($s.State) {
+            'Running' { 1.0 }
+            'ConfiguredNotRunning' { 0.5 }
+            'NotConfigured' { 0.0 }
+            default { $null }
+        }
+        if ($null -eq $fraction) {
+            $breakdown += [pscustomobject]@{ Id = $s.Id; Name = $s.Name; State = $s.State; Weight = $s.Weight; Points = 0; Counted = $false }
+            continue
+        }
+        $points = [double]$s.Weight * $fraction
+        $earned += $points
+        $possible += [double]$s.Weight
+        $breakdown += [pscustomobject]@{ Id = $s.Id; Name = $s.Name; State = $s.State; Weight = $s.Weight; Points = [math]::Round($points, 1); Counted = $true }
+    }
+
+    $score = if ($possible -gt 0) { [int][math]::Round(($earned / $possible) * 100) } else { 0 }
+
+    $grade = if ($score -ge 90) { 'Excellent' }
+             elseif ($score -ge 75) { 'Good' }
+             elseif ($score -ge 50) { 'Fair' }
+             elseif ($score -gt 0) { 'Weak' }
+             else { 'Unprotected' }
+
+    return [pscustomobject]@{
+        Score = $score
+        Grade = $grade
+        Earned = [math]::Round($earned, 1)
+        Possible = [math]::Round($possible, 1)
+        ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
+        Breakdown = $breakdown
+    }
+}
+
+function Get-SecuredCoreVerdict {
+    <# Secured-core PC requires the full hardware and software stack. #>
+    param([Parameter(Mandatory = $true)]$State, [Parameter(Mandatory = $true)]$Statuses)
+
+    $checks = @(
+        [pscustomobject]@{ Name = 'UEFI firmware mode'; Met = $State.Firmware.IsUefiConfirmed }
+        [pscustomobject]@{ Name = 'Secure Boot enabled'; Met = [bool]$State.Firmware.SecureBootEnabled }
+        [pscustomobject]@{ Name = 'TPM 2.0'; Met = $State.Tpm.IsTPM2 }
+        [pscustomobject]@{ Name = 'Virtualization-based Security running'; Met = [bool](@($Statuses | Where-Object { $_.Id -eq 'vbs' -and $_.State -eq 'Running' }).Count -gt 0) }
+        [pscustomobject]@{ Name = 'Memory Integrity running'; Met = [bool](@($Statuses | Where-Object { $_.Id -eq 'hvci' -and $_.State -eq 'Running' }).Count -gt 0) }
+        [pscustomobject]@{ Name = 'System Guard Secure Launch running'; Met = [bool](@($Statuses | Where-Object { $_.Id -eq 'secure-launch' -and $_.State -eq 'Running' }).Count -gt 0) }
+        [pscustomobject]@{ Name = 'DMA protection available'; Met = $State.DeviceGuard.HasDmaProtection }
+        [pscustomobject]@{ Name = 'SMM mitigations available'; Met = $State.DeviceGuard.HasSmmMitigations }
+    )
+    $unmet = @($checks | Where-Object { -not $_.Met })
+    return [pscustomobject]@{
+        Qualifies = [bool]($unmet.Count -eq 0)
+        Checks = $checks
+        UnmetCount = $unmet.Count
+    }
+}
+
+# ---------------------------------------------------------------------------
+# CIS comparison
+# ---------------------------------------------------------------------------
+
+function Get-CisComplianceReport {
+    <#
+        CIS section 18.9.5 audits HKLM\SOFTWARE\Policies\Microsoft\Windows\DeviceGuard.
+        WinDSH configures local values under HKLM\SYSTEM\CurrentControlSet\Control and
+        never writes the policy hive, so a machine configured by WinDSH will have the
+        features running but will NOT pass a CIS scan. That is reported, not hidden.
+    #>
+    param([Parameter(Mandatory = $true)]$State, [Parameter(Mandatory = $true)]$Statuses)
+
+    $rows = @()
+    foreach ($control in $script:ControlCatalog) {
+        if ($null -eq $control.Cis) { continue }
+        $status = @($Statuses | Where-Object { $_.Id -eq $control.Id })[0]
+
+        $policyName = $null; $policyValue = $null; $expected = $null; $accepted = @()
+        foreach ($pv in (ConvertTo-Array $control.PolicyValues)) {
+            $policyName = $pv.Name
+            $expected = $pv.Expected
+            $accepted = @($pv.Expected) + (ConvertTo-Array (Get-PropertySafe $pv 'AlsoAccepted' @()))
+            if ($State.Policy.Values.ContainsKey($pv.Name)) { $policyValue = $State.Policy.Values[$pv.Name] }
+            break
+        }
+
+        $compliant = [bool]($null -ne $policyValue -and (@($accepted) -contains [int]$policyValue))
+
+        $rows += [pscustomobject]@{
+            CisId = $control.Cis.Id
+            Profile = $control.Cis.Profile
+            Title = $control.Cis.Title
+            ControlId = $control.Id
+            PolicyValueName = $policyName
+            Expected = $expected
+            Actual = $policyValue
+            Compliant = $compliant
+            FeatureRunning = [bool]($status -and $status.State -eq 'Running')
+            Divergence = Get-PropertySafe $control.Cis 'Divergence' $null
+        }
+    }
+
+    $compliantCount = @($rows | Where-Object { $_.Compliant }).Count
+    return [pscustomobject]@{
+        Benchmark = $script:CisBenchmark
+        Section = '18.9.5 Device Guard'
+        PolicyPath = $State.Policy.Path
+        Rows = $rows
+        TotalCount = @($rows).Count
+        CompliantCount = $compliantCount
+        RunningButNotCompliantCount = @($rows | Where-Object { $_.FeatureRunning -and -not $_.Compliant }).Count
+        Note = 'CIS audits the Group Policy hive. WinDSH configures local machine values and never writes Group Policy, so features can be active while these checks still report non-compliant.'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Generic explainer - replaces the per-feature diagnostics in v1
+# ---------------------------------------------------------------------------
+
+function Get-ControlExplanation {
+    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State)
+
+    $control = Get-Control -Id $Id
+    $status = Get-ControlStatus -Id $Id -State $State
+
+    $verdict = $null; $action = $null; $severity = 'Info'
+
+    if ($status.State -eq 'Running') {
+        $verdict = ('{0} is running. Nothing to do.' -f $control.Name)
+        $severity = 'Good'
+    }
+    elseif ($status.ManagedByPolicy) {
+        $verdict = ('{0} is managed by your organisation''s Group Policy.' -f $control.Name)
+        $action = 'WinDSH will not override a policy-managed setting. Contact whoever manages this computer.'
+        $severity = 'Info'
+    }
+    elseif (-not $status.Supported) {
+        $verdict = $status.SupportReason
+        $action = $status.SupportFix
+        $severity = 'Warn'
+    }
+    elseif ($status.BlockedBy) {
+        $verdict = ('{0} cannot run because {1} is not running.' -f $control.Name, $status.BlockedBy.Name)
+        $action = ('Resolve {0} first. Run: -Explain {1}' -f $status.BlockedBy.Name, $status.BlockedBy.Id)
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'ConfiguredNotRunning') {
+        if ($State.Restart.Pending -or $script:RestartRequired) {
+            $verdict = ('{0} is configured but Windows has not restarted since the change.' -f $control.Name)
+            $action = 'Restart Windows, then run the audit again.'
+            $severity = 'Warn'
+        }
+        else {
+            $verdict = ('{0} is configured, Windows has restarted, and it still is not running. Everything Windows can check is satisfied, so the remaining explanation is hardware or firmware capability.' -f $control.Name)
+            $action = Get-HardwareCapabilityAdvice -Control $control -State $State
+            $severity = 'Info'
+        }
+    }
+    elseif (Get-PropertySafe $control 'DetectionOnly' $false) {
+        $verdict = ('{0} is not active on this computer.' -f $control.Name)
+        $action = 'WinDSH reports this but does not configure it. It is provided by Windows or the platform firmware.'
+        $severity = 'Info'
     }
     else {
-        Write-Host 'No .sys driver name/path was extracted from the collected events.' -ForegroundColor DarkGray
+        $verdict = ('{0} is not configured.' -f $control.Name)
+        $action = if ($control.Remediable) { ('This tool can configure it. Run with -Enable {0}' -f $control.Id) } else { 'Configure it through Windows Security.' }
+        $severity = 'Info'
+
+        $preflight = Get-ControlPreflight -Control $control
+        if ($preflight -and $preflight.Tripped) {
+            $verdict = ('{0} is not configured, and enabling it right now looks risky.' -f $control.Name)
+            $lines = @($preflight.Message, '')
+            $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount)
+            foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
+                $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
+                $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
+                $svc = if ($d.Service) { (' - {0}' -f $d.Service) } else { '' }
+                $lines += ('  - {0} ({1}, {2}){3}' -f $d.FileName, $who, $ver, $svc)
+            }
+            $lines += ''
+            $lines += '  Update or remove the driver above, restart, then run the audit again.'
+            $action = ($lines -join "`n")
+            $severity = 'Warn'
+        }
     }
-    Write-Host 'These events are diagnostic evidence, not a guarantee that a listed file is the only blocker or that an unlisted driver is compatible.' -ForegroundColor DarkGray
+
+    return [pscustomobject]@{
+        Id = $control.Id
+        Name = $control.Name
+        PlainName = $control.PlainName
+        Summary = $control.Summary
+        Why = $control.Why
+        Caution = Get-PropertySafe $control 'Caution' $null
+        DocUrl = $control.DocUrl
+        Verdict = $verdict
+        Action = $action
+        Severity = $severity
+        Status = $status
+        Cis = $control.Cis
+    }
+}
+
+function Get-HardwareCapabilityAdvice {
+    param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
+
+    switch ($Control.Id) {
+        'secure-launch' {
+            return @(
+                'Secure Launch needs DRTM-capable firmware, which cannot be detected in advance.',
+                '',
+                ('  Your processor: {0}' -f $State.Computer.ProcessorName),
+                '',
+                '  1. DRTM requires Intel vPro (8th generation or newer) or AMD Zen 2 or newer.',
+                '     Most consumer and non-vPro laptops do not have it, and it cannot be added',
+                '     by a software or firmware update.',
+                '  2. If your CPU does qualify, look in BIOS setup for "Intel TXT" or "Trusted',
+                '     Execution" (AMD: "SKINIT"), usually under Security or Advanced. On Intel it',
+                '     is often hidden until both TPM and VT-x are enabled, so enable those first.',
+                '  3. Update to the newest BIOS from your manufacturer.',
+                '',
+                '  If none apply this is a hardware limit, not a fault. The setting is harmless',
+                '  and your other protections are unaffected.'
+            ) -join "`n"
+        }
+        'kernel-shadow-stacks' {
+            return @(
+                'Kernel shadow stacks need CPU hardware support for shadow stacks.',
+                '',
+                ('  Your processor: {0}' -f $State.Computer.ProcessorName),
+                '',
+                '  Requires an Intel Tiger Lake or AMD Zen 3 processor or newer (both late 2020),',
+                '  and Memory Integrity must already be running. Without both, the setting has no',
+                '  effect. This is a hardware limit, not a fault.'
+            ) -join "`n"
+        }
+        'hvci' {
+            return @(
+                'Memory Integrity is configured but Windows declined to start it.',
+                '',
+                '  The usual cause is a driver that is not compatible. Windows records these in',
+                '  Event Viewer under Applications and Services Logs > Microsoft > Windows >',
+                '  CodeIntegrity > Operational, as event ID 3087.',
+                '',
+                '  Update or remove the driver named there, then restart.'
+            ) -join "`n"
+        }
+        default {
+            return 'Everything Windows can verify is in order. The remaining explanation is that this hardware or firmware does not provide the capability.'
+        }
+    }
+}
+
+# ===== 45-firmware.ps1 =====
+# ---------------------------------------------------------------------------
+# Firmware (BIOS/UEFI) guidance.
+#
+# "Enable it in BIOS" is not usable guidance for a non-technical user. This answers
+# how to get in, where the setting lives on their machine, what it is called there,
+# and what could go wrong.
+#
+# Ported from v1.6.0 with one design fault corrected: there, Show-FirmwareGuidance
+# could reboot the computer, so a Show-* function had side effects and the restart
+# bypassed -WhatIf entirely. Here Get-FirmwareGuidance returns data, Show- renders it,
+# and only the caller may act on it.
+# ---------------------------------------------------------------------------
+
+function Get-DriveEncryptionSummary {
+    <#
+        READ ONLY. WinDSH never manages BitLocker, but it must warn before sending
+        someone into firmware: changing or clearing a TPM with BitLocker active can make
+        Windows demand a 48-digit recovery key at next boot, and someone without that key
+        is locked out of their own data.
+    #>
+    $protected = @()
+    try {
+        $volumes = @(Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftVolumeEncryption' `
+                        -ClassName 'Win32_EncryptableVolume' -ErrorAction Stop)
+        foreach ($v in $volumes) {
+            if ([int](Get-PropertySafe $v 'ProtectionStatus' 0) -eq 1) {
+                $protected += [string](Get-PropertySafe $v 'DriveLetter' '?')
+            }
+        }
+        return [pscustomobject]@{ Queried = $true; AnyProtected = [bool](@($protected).Count -gt 0); ProtectedDrives = $protected }
+    }
+    catch {
+        Write-DebugError 'Query BitLocker protection status' $_
+        # Unknown is treated as "warn anyway": being over-cautious about a recovery-key
+        # lockout costs nothing, being wrong the other way can cost the user their data.
+        return [pscustomobject]@{ Queried = $false; AnyProtected = $null; ProtectedDrives = @() }
+    }
+}
+
+function Get-FirmwareVendorHints {
+    <#
+        Maps a manufacturer to the menu locations its firmware normally uses. Layouts
+        differ by model and firmware revision, so every hint is phrased as typical, and an
+        unrecognised manufacturer returns nulls rather than an invented path.
+    #>
+    param([string]$Manufacturer, [string]$Model)
+
+    $m = ('{0} {1}' -f $Manufacturer, $Model)
+
+    if ($m -match 'Microsoft' -and $m -match 'Surface') {
+        return [pscustomobject]@{
+            Vendor = 'Microsoft Surface'
+            EnterKey = 'Shut down fully, then hold Volume Up and press Power. Keep holding Volume Up until the Surface UEFI screen appears.'
+            TPM = 'Security section. Surface devices have TPM 2.0 enabled by default.'
+            Virtualization = 'Usually always on and not exposed as a setting.'
+            SecureBoot = 'Security section, Secure Boot.'
+        }
+    }
+    if ($m -match '\bDell\b|Alienware') {
+        return [pscustomobject]@{
+            Vendor = 'Dell'
+            EnterKey = 'Tap F2 repeatedly as the Dell logo appears.'
+            TPM = 'Security > TPM 2.0 Security (older models call it PTT Security). Set it to On.'
+            Virtualization = 'Virtualization Support > Virtualization. Also enable VT for Direct I/O.'
+            SecureBoot = 'Boot Configuration or Secure Boot > Secure Boot Enable.'
+        }
+    }
+    if ($m -match '\bHP\b|Hewlett') {
+        return [pscustomobject]@{
+            Vendor = 'HP'
+            EnterKey = 'Tap F10 repeatedly at power on. On some models press Esc first, then F10.'
+            TPM = 'Security > TPM Device and TPM State, or Embedded Security Device.'
+            Virtualization = 'Advanced > System Options > Virtualization Technology (VTx). Also enable VTd.'
+            SecureBoot = 'Advanced > Secure Boot Configuration. Some HP models require a BIOS administrator password to be set before this can change.'
+        }
+    }
+    if ($m -match 'Lenovo|ThinkPad|IdeaPad') {
+        return [pscustomobject]@{
+            Vendor = 'Lenovo'
+            EnterKey = 'ThinkPad: tap F1 at the logo. IdeaPad: tap F2, or use the small Novo button next to the power socket.'
+            TPM = 'Security > Security Chip. Set Security Chip Selection to Intel PTT or Discrete TPM, then set Security Chip to Enabled.'
+            Virtualization = 'Security > Virtualization > Intel Virtualization Technology. Also enable Intel VT-d.'
+            SecureBoot = 'Security > Secure Boot.'
+        }
+    }
+    if ($m -match 'ASUS|ASUSTeK') {
+        return [pscustomobject]@{
+            Vendor = 'ASUS'
+            EnterKey = 'Tap F2 or Delete at power on. Press F7 for Advanced Mode if you land on the simple EZ screen.'
+            TPM = 'Intel: Advanced > PCH-FW Configuration > PTT. AMD: Advanced > AMD fTPM configuration.'
+            Virtualization = 'Intel: Advanced > CPU Configuration > Intel (VMX) Virtualization Technology. AMD: Advanced > CPU Configuration > SVM Mode.'
+            SecureBoot = 'Boot > Secure Boot. Set OS Type to Windows UEFI mode.'
+        }
+    }
+    if ($m -match '\bAcer\b|Predator') {
+        return [pscustomobject]@{
+            Vendor = 'Acer'
+            EnterKey = 'Tap F2 at the Acer logo.'
+            TPM = 'Security > TPM State, or Main > TPM.'
+            Virtualization = 'Main or Advanced > VT-x / Virtualization Technology.'
+            SecureBoot = 'Boot > Secure Boot. IMPORTANT: on most Acer models Secure Boot stays greyed out until you set a Supervisor Password under Security. Set one, enable Secure Boot, then you may remove the password.'
+        }
+    }
+    if ($m -match '\bMSI\b|Micro-Star') {
+        return [pscustomobject]@{
+            Vendor = 'MSI'
+            EnterKey = 'Tap Delete at power on.'
+            TPM = 'Settings > Security > Trusted Computing > Security Device Support. Intel: PTT. AMD: AMD fTPM switch.'
+            Virtualization = 'OC > CPU Features > Intel Virtualization Tech, or SVM Mode on AMD.'
+            SecureBoot = 'Settings > Advanced > Windows OS Configuration > Secure Boot.'
+        }
+    }
+    if ($m -match 'Gigabyte|ASRock') {
+        return [pscustomobject]@{
+            Vendor = 'Gigabyte / ASRock'
+            EnterKey = 'Tap Delete or F2 at power on.'
+            TPM = 'Settings > Miscellaneous > Intel Platform Trust Technology (PTT), or AMD CPU fTPM. On ASRock look under Security or Advanced > CPU Configuration.'
+            Virtualization = 'Tweaker or Advanced > CPU Configuration > SVM Mode (AMD) or Intel Virtualization Technology.'
+            SecureBoot = 'Boot > Secure Boot. Set to Windows UEFI mode / Standard.'
+        }
+    }
+
+    return [pscustomobject]@{
+        Vendor = $(if ([string]::IsNullOrWhiteSpace($Manufacturer)) { 'Unknown' } else { $Manufacturer })
+        EnterKey = $null; TPM = $null; Virtualization = $null; SecureBoot = $null
+    }
+}
+
+function Get-FirmwareGuidance {
+    <# Pure: returns what needs changing and where. Takes no action. #>
+    param([Parameter(Mandatory = $true)]$State)
+
+    $hints = Get-FirmwareVendorHints -Manufacturer $State.Computer.Manufacturer -Model $State.Computer.Model
+    $encryption = Get-DriveEncryptionSummary
+    $needed = @()
+
+    if (-not $State.Tpm.Present -or -not $State.Tpm.IsTPM2) {
+        $needed += [pscustomobject]@{
+            What = 'Security processor (TPM 2.0)'
+            Why = 'Stores boot measurements. Needed for Secure Launch, and used by BitLocker and Windows Hello.'
+            AlsoCalled = 'Intel PTT, Platform Trust Technology, AMD fTPM, Security Device, Security Chip, Trusted Computing'
+            Where = $hints.TPM
+        }
+    }
+    if (-not $State.Virtualization.FirmwareEnabled) {
+        $needed += [pscustomobject]@{
+            What = 'CPU virtualization'
+            Why = 'Required for Virtualization-based Security. Nothing VBS-related can run without it.'
+            AlsoCalled = 'Intel VT-x, Intel Virtualization Technology, VMX, AMD SVM, SVM Mode, AMD-V'
+            Where = $hints.Virtualization
+        }
+    }
+    if ($State.Firmware.SecureBootSupported -and -not $State.Firmware.SecureBootEnabled) {
+        $needed += [pscustomobject]@{
+            What = 'Secure Boot'
+            Why = 'Verifies the boot chain. WinDSH requires it for VBS, so VBS will not start while it is off.'
+            AlsoCalled = 'Secure Boot Enable, Windows UEFI mode, OS Type'
+            Where = $hints.SecureBoot
+        }
+    }
+    if ($State.HypervisorLaunch.BlocksVbs) {
+        $needed += [pscustomobject]@{
+            What = 'Windows hypervisor (not a firmware setting)'
+            Why = 'The boot configuration currently switches the hypervisor off, which blocks every VBS feature.'
+            AlsoCalled = 'hypervisorlaunchtype'
+            Where = 'Fix this in Windows, not firmware. In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.'
+        }
+    }
+
+    return [pscustomobject]@{
+        Vendor = $hints.Vendor
+        EnterKey = $hints.EnterKey
+        Encryption = $encryption
+        Needed = $needed
+        LegacyWarning = [bool]$State.Firmware.IsLegacyConfirmed
+        CanOfferReboot = [bool](@($needed).Count -gt 0)
+    }
+}
+
+function Show-FirmwareGuidance {
+    <# Renders only. The caller decides whether to offer a restart. #>
+    param([Parameter(Mandatory = $true)]$Guidance, [Parameter(Mandatory = $true)]$State)
+
+    Write-Section 'Changing firmware (BIOS/UEFI) settings'
+    Write-Line ('Detected system : {0} {1}' -f $State.Computer.Manufacturer, $State.Computer.Model) 'Dim'
+    Write-Line ('Processor       : {0}' -f $State.Computer.ProcessorName) 'Dim'
+    Write-Line ('Firmware mode   : {0}' -f $State.Firmware.Mode) 'Dim'
+
+    Write-Line ''
+    if ($Guidance.Encryption.AnyProtected) {
+        Write-Line 'BEFORE YOU CHANGE ANYTHING' 'Bad'
+        Write-Line ('BitLocker is protecting: {0}' -f (@($Guidance.Encryption.ProtectedDrives) -join ', ')) 'Bad' 2
+        Write-Line 'Changing or clearing the TPM can make Windows ask for a 48-digit recovery key at the' 'Warn' 2
+        Write-Line 'next start. Without that key the drive cannot be opened.' 'Warn' 2
+        Write-Line 'Find your key first at https://aka.ms/myrecoverykey, or suspend BitLocker before' 'Warn' 2
+        Write-Line 'entering firmware.' 'Warn' 2
+    }
+    elseif (-not $Guidance.Encryption.Queried) {
+        Write-Line 'BEFORE YOU CHANGE ANYTHING' 'Warn'
+        Write-Line 'Drive encryption status could not be read. If this PC uses BitLocker or Device' 'Warn' 2
+        Write-Line 'Encryption, locate your recovery key first: https://aka.ms/myrecoverykey' 'Warn' 2
+    }
+    else {
+        Write-Line 'Drive encryption is not active, so TPM changes will not trigger a recovery prompt.' 'Dim'
+    }
+
+    Write-Line ''
+    Write-Line 'How to open firmware setup' 'Head'
+    Write-Line 'Easiest, works on every PC:' 'Plain' 2
+    Write-Line 'Settings > System > Recovery > Advanced startup > Restart now' 'Info' 4
+    Write-Line 'then Troubleshoot > Advanced options > UEFI Firmware Settings > Restart' 'Info' 4
+    if ($Guidance.EnterKey) { Write-Line ('On your {0}: {1}' -f $Guidance.Vendor, $Guidance.EnterKey) 'Info' 2 }
+    else { Write-Line 'Key at power on varies by manufacturer: F2, F10, F12 or Delete are the usual ones.' 'Info' 2 }
+
+    Write-Line ''
+    if (@($Guidance.Needed).Count -eq 0) {
+        Write-Line 'Nothing needs changing in firmware. Every setting WinDSH can see is already correct.' 'Good'
+    }
+    else {
+        Write-Line 'What to change on this PC' 'Head'
+        $n = 0
+        foreach ($item in $Guidance.Needed) {
+            $n++
+            Write-Line ''
+            Write-Line ('{0}. {1}' -f $n, $item.What) 'Warn' 2
+            Write-Line ('Why        : {0}' -f $item.Why) 'Dim' 5
+            Write-Line ('Also called: {0}' -f $item.AlsoCalled) 'Dim' 5
+            if ($item.Where) { Write-Line ('Where      : {0}' -f $item.Where) 'Info' 5 }
+            else {
+                Write-Line 'Where      : Menu layout unknown for this manufacturer. Search your model' 'Info' 5
+                Write-Line '             number plus the setting name on the support site.' 'Info' 5
+            }
+        }
+    }
+
+    if ($Guidance.LegacyWarning) {
+        Write-Line ''
+        Write-Line 'This PC is running in Legacy/CSM mode, not UEFI.' 'Warn'
+        Write-Line 'Secure Boot cannot be enabled until that changes, but switching the firmware to UEFI' 'Warn' 2
+        Write-Line 'will stop Windows starting unless the disk is converted from MBR to GPT first' 'Warn' 2
+        Write-Line '(mbr2gpt). Back up before attempting this, or ask a technician.' 'Warn' 2
+    }
+
+    Write-Line ''
+    Write-Line 'General notes' 'Head'
+    Write-Line 'Change one setting at a time, save and exit (usually F10), then restart into Windows.' 'Dim' 2
+    Write-Line 'Run the audit again after each change so you can see what it actually did.' 'Dim' 2
+    Write-Line 'If a setting you need is missing entirely, update to the newest BIOS from your maker.' 'Dim' 2
+    Write-Line 'Some settings stay hidden until related ones are on. Intel TXT commonly does not appear' 'Dim' 2
+    Write-Line 'until both TPM and VT-x are enabled.' 'Dim' 2
+    Write-Line 'WinDSH never changes firmware, Secure Boot keys or the TPM. All of this is manual.' 'Dim' 2
+}
+
+function Invoke-RebootToFirmware {
+    <# The side effect, kept out of the Show- function and behind explicit confirmation. #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory = $true)]$Guidance)
+
+    if ($Guidance.Encryption.AnyProtected) {
+        Write-Line 'Reminder: have your BitLocker recovery key available before continuing.' 'Bad'
+    }
+    Write-Line 'Restarting will close all applications. Save your work first.' 'Warn'
+    if (-not (Confirm-Action 'Restart now directly into firmware setup?')) { return $false }
+    if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Restart into firmware setup')) { return $false }
+
+    Write-Line 'Restarting into firmware setup...' 'Info'
+    & (Join-Path $env:SystemRoot 'System32\shutdown.exe') '/r' '/fw' '/t' '5'
+    if ($LASTEXITCODE -ne 0) {
+        Write-Line 'Windows refused the request to boot into firmware setup.' 'Warn'
+        Write-Line 'Use the Settings > Recovery > Advanced startup route described above instead.' 'Warn'
+        return $false
+    }
+    return $true
 }
 
 function Open-CodeIntegrityEventViewer {
     try {
-        Start-Process -FilePath 'eventvwr.msc' -ArgumentList '/c:Microsoft-Windows-CodeIntegrity/Operational' -ErrorAction Stop
-        Write-Host 'Event Viewer was opened for the Code Integrity Operational log when supported by this Windows build.' -ForegroundColor Green
-        Write-Host 'Path: Applications and Services Logs > Microsoft > Windows > CodeIntegrity > Operational' -ForegroundColor Gray
+        Start-Process -FilePath 'eventvwr.msc' -ArgumentList '/c:Microsoft-Windows-CodeIntegrity/Operational' -ErrorAction Stop | Out-Null
+        Write-Line 'Opened Event Viewer at the Code Integrity log.' 'Good'
+        return $true
     }
     catch {
-        Write-DebugException -Stage 'Open Code Integrity Event Viewer' -ErrorRecord $_
-        try { Start-Process -FilePath 'eventvwr.msc' -ErrorAction Stop } catch { Write-DebugException -Stage 'Open Event Viewer fallback' -ErrorRecord $_ }
-        Write-Host 'Event Viewer was opened. Navigate to: Applications and Services Logs > Microsoft > Windows > CodeIntegrity > Operational' -ForegroundColor Yellow
+        Write-DebugError 'Open Event Viewer' $_
+        Write-Line 'Could not open Event Viewer automatically.' 'Warn'
+        Write-Line 'Open it manually: Applications and Services Logs > Microsoft > Windows >' 'Info' 2
+        Write-Line 'CodeIntegrity > Operational, and look for event ID 3087.' 'Info' 2
+        return $false
     }
 }
 
-function New-PlanItem {
-    param(
-        [string]$Feature,
-        [string]$Path,
-        [string]$Name,
-        [int]$Proposed,
-        [string]$Note
-    )
-    $current = Get-RegistryValueSafe -Path $Path -Name $Name
-    return [pscustomobject]@{
-        Feature = $Feature
-        Path = $Path
-        Name = $Name
-        Current = $current
-        Proposed = $Proposed
-        WillChange = [bool]($null -eq $current -or [int]$current -ne $Proposed)
-        Note = $Note
+function Show-CodeIntegrityDiagnostics {
+    param([Parameter(Mandatory = $true)]$State)
+
+    Write-Section 'Memory Integrity driver diagnostics'
+    $events = Get-CodeIntegrityEvents -EventIds @(3087) -LookbackDays 14
+
+    if (-not $events.Queried) {
+        Write-Line 'The Code Integrity log could not be read.' 'Warn'
+        if ($events.Error) { Write-Line $events.Error 'Dim' 2 }
+        return
     }
+    if ($events.EventCount -eq 0) {
+        Write-Line 'No driver-compatibility warnings in the last 14 days.' 'Good'
+        Write-Line 'Nothing is recorded as blocking Memory Integrity on this computer.' 'Dim'
+        return
+    }
+
+    Write-Line ('{0} compatibility event(s) in the last 14 days.' -f $events.EventCount) 'Warn'
+    if ($events.Newest) { Write-Line ('Most recent: {0}' -f $events.Newest) 'Dim' }
+    Write-Line ''
+    Write-Line 'Drivers named in those events:' 'Head'
+    foreach ($d in (ConvertTo-Array $events.Drivers)) {
+        Write-Line $d.FileName 'Warn' 2
+        if ($d.Publisher) { Write-Line ('Publisher: {0}' -f $d.Publisher) 'Dim' 5 }
+        if ($d.Version) { Write-Line ('Version  : {0}' -f $d.Version) 'Dim' 5 }
+        if ($d.Service) { Write-Line ('Used by  : {0}' -f $d.Service) 'Dim' 5 }
+        if ($d.Path) { Write-Line ('Path     : {0}' -f $d.Path) 'Dim' 5 }
+        if (-not $d.Found) { Write-Line 'This file is no longer present, so the problem may already be resolved.' 'Dim' 5 }
+    }
+    Write-Line ''
+    Write-Line 'Update or remove the driver above, restart, then run the audit again.' 'Info'
+}
+
+# ===== 50-apply.ps1 =====
+# ---------------------------------------------------------------------------
+# Plan, apply and revert.
+#
+# The plan is a projection of the catalog, so -WhatIf cannot disagree with what apply
+# actually writes. Every change is journalled BEFORE the registry is touched, which is
+# what makes rollback possible even after an interrupted run. v1 had no rollback at all.
+# ---------------------------------------------------------------------------
+
+function Get-ControlDelta {
+    param([Parameter(Mandatory = $true)][string]$Id)
+
+    $control = Get-Control -Id $Id
+    $rows = @()
+    foreach ($value in (ConvertTo-Array $control.LocalValues)) {
+        $exists = Test-RegValue -Path $value.Path -Name $value.Name
+        $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
+        $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
+
+        $needs = if (-not $exists) { $true }
+                 elseif ($comparison -eq 'AtLeast') { [int]$current -lt [int]$value.Value }
+                 else { [int]$current -ne [int]$value.Value }
+
+        $rows += [pscustomobject]@{
+            ControlId = $control.Id
+            ControlName = $control.Name
+            Path = $value.Path
+            Name = $value.Name
+            Type = $value.Type
+            Comparison = $comparison
+            CurrentValue = $current
+            CurrentExists = $exists
+            DesiredValue = $value.Value
+            NeedsChange = [bool]$needs
+            Note = $value.Note
+        }
+    }
+    return $rows
 }
 
 function Get-ChangePlan {
     param(
-        [Parameter(Mandatory=$true)]$State,
-        [ValidateSet('Safe','CredentialGuard')][string]$Target = 'Safe'
+        [Parameter(Mandatory = $true)][string[]]$Ids,
+        [Parameter(Mandatory = $true)]$State
     )
-    $items = @()
-    $skipped = @()
-    $dgPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
-
-    if ($Target -eq 'Safe') {
-        $miAvailability = Get-MenuActionAvailability -State $State -Key '2'
-        if ($miAvailability.Actionable) {
-            # Preview follows the same conservative rule as Enable All Safe: recent Event ID
-            # 3087 compatibility evidence means HVCI is skipped pending technician review.
-            $previewDiagnostics = Get-HvciDiagnostics
-            if ($previewDiagnostics.CompatibilityEventCount -gt 0) {
-                $skipped += [pscustomobject]@{Feature='Memory Integrity';Reason=('Recent Code Integrity Event ID 3087 compatibility events found: {0}. Technician review required.' -f $previewDiagnostics.CompatibilityEventCount);Category='Compatibility'}
-            }
-            else {
-                $hvciPath = Join-Path $dgPath 'Scenarios\HypervisorEnforcedCodeIntegrity'
-                $items += New-PlanItem 'Memory Integrity' $dgPath 'EnableVirtualizationBasedSecurity' 1 'Enable VBS.'
-                $items += New-PlanItem 'Memory Integrity' $dgPath 'RequirePlatformSecurityFeatures' 1 'Require Secure Boot-capable platform baseline without UEFI lock.'
-                $items += New-PlanItem 'Memory Integrity' $dgPath 'Locked' 0 'Do not use UEFI lock.'
-                $items += New-PlanItem 'Memory Integrity' $hvciPath 'Enabled' 1 'Enable HVCI / Memory Integrity.'
-                $items += New-PlanItem 'Memory Integrity' $hvciPath 'Locked' 0 'Do not use UEFI lock.'
-            }
-        }
-        else { $skipped += [pscustomobject]@{Feature='Memory Integrity';Reason=$miAvailability.Reason;Category=$miAvailability.Category} }
-
-        $sgAvailability = Get-MenuActionAvailability -State $State -Key '3'
-        if ($sgAvailability.Actionable) {
-            if ($null -eq $State.Policy.EnableVirtualizationBasedSecurity) {
-                $items += New-PlanItem 'Secure Launch' $dgPath 'EnableVirtualizationBasedSecurity' 1 'Enable VBS prerequisite.'
-                $items += New-PlanItem 'Secure Launch' $dgPath 'RequirePlatformSecurityFeatures' 1 'Use documented platform security baseline.'
-                $items += New-PlanItem 'Secure Launch' $dgPath 'Locked' 0 'Do not use UEFI lock.'
-            }
-            $systemGuardPath = Join-Path $dgPath 'Scenarios\SystemGuard'
-            $items += New-PlanItem 'Secure Launch' $systemGuardPath 'Enabled' 1 'Configure System Guard Secure Launch; Windows verifies hardware support at boot.'
-        }
-        else { $skipped += [pscustomobject]@{Feature='Secure Launch';Reason=$sgAvailability.Reason;Category=$sgAvailability.Category} }
-    }
-    else {
-        $cgAvailability = Get-MenuActionAvailability -State $State -Key '4'
-        if ($cgAvailability.Actionable) {
-            if ($null -eq $State.Policy.EnableVirtualizationBasedSecurity) {
-                $items += New-PlanItem 'Credential Guard' $dgPath 'EnableVirtualizationBasedSecurity' 1 'Enable VBS prerequisite.'
-                $items += New-PlanItem 'Credential Guard' $dgPath 'RequirePlatformSecurityFeatures' 1 'Use documented platform security baseline.'
-                $items += New-PlanItem 'Credential Guard' $dgPath 'Locked' 0 'Do not use UEFI lock.'
-            }
-            $items += New-PlanItem 'Credential Guard' 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' 'LsaCfgFlags' 2 'Enable Credential Guard without UEFI lock.'
-        }
-        else { $skipped += [pscustomobject]@{Feature='Credential Guard';Reason=$cgAvailability.Reason;Category=$cgAvailability.Category} }
-    }
-
-    # Deduplicate registry targets shared by more than one feature while retaining feature names.
-    $unique = @()
+    $plan = @()
     $seen = @{}
-    foreach ($item in $items) {
-        $key = ('{0}|{1}' -f $item.Path,$item.Name).ToLowerInvariant()
-        if (-not $seen.ContainsKey($key)) {
-            $seen[$key] = $unique.Count
-            $unique += $item
+    foreach ($id in $Ids) {
+        foreach ($control in (Resolve-ControlOrder -Id $id)) {
+            if ($seen.ContainsKey($control.Id)) { continue }
+            $seen[$control.Id] = $true
+
+            $status = Get-ControlStatus -Id $control.Id -State $State
+            foreach ($row in (Get-ControlDelta -Id $control.Id)) {
+                $plan += [pscustomobject]@{
+                    ControlId = $row.ControlId
+                    ControlName = $row.ControlName
+                    Path = $row.Path
+                    Name = $row.Name
+                    Type = $row.Type
+                    CurrentValue = $row.CurrentValue
+                    CurrentExists = $row.CurrentExists
+                    DesiredValue = $row.DesiredValue
+                    NeedsChange = $row.NeedsChange
+                    Note = $row.Note
+                    ManagedByPolicy = $status.ManagedByPolicy
+                    Supported = $status.Supported
+                    SkipReason = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
+                                 elseif (-not $status.Supported) { $status.SupportReason }
+                                 else { $null }
+                }
+            }
+        }
+    }
+    return $plan
+}
+
+# ---------------------------------------------------------------------------
+# Change journal
+# ---------------------------------------------------------------------------
+
+function Get-JournalPath {
+    if ($env:WINDSH_JOURNAL_PATH) { return $env:WINDSH_JOURNAL_PATH }
+    $root = if ($env:ProgramData) { Join-Path $env:ProgramData 'WinDSH' } else { Join-Path ([IO.Path]::GetTempPath()) 'WinDSH' }
+    return (Join-Path $root 'changes.jsonl')
+}
+
+function Write-JournalEntry {
+    param([Parameter(Mandatory = $true)]$Entry)
+    $path = Get-JournalPath
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [IO.File]::AppendAllText($path, (($Entry | ConvertTo-Json -Compress -Depth 5) + "`n"), (New-Object Text.UTF8Encoding($false)))
+}
+
+function Get-Journal {
+    param([string]$RunId)
+    $path = Get-JournalPath
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+
+    $entries = @()
+    foreach ($line in [IO.File]::ReadAllLines($path)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        # A truncated tail must not make the whole journal unreadable.
+        try { $entries += ($line | ConvertFrom-Json) } catch { continue }
+    }
+    if ($RunId) { $entries = @($entries | Where-Object { $_.RunId -eq $RunId }) }
+    return $entries
+}
+
+function Get-JournalRuns {
+    $runs = @()
+    foreach ($group in (Get-Journal | Group-Object RunId)) {
+        $first = @($group.Group | Sort-Object Time)[0]
+        $runs += [pscustomobject]@{
+            RunId = $group.Name
+            Time = $first.Time
+            ChangeCount = $group.Count
+            Controls = (@($group.Group | Select-Object -ExpandProperty ControlId -Unique) -join ', ')
+        }
+    }
+    return @($runs | Sort-Object Time -Descending)
+}
+
+# ---------------------------------------------------------------------------
+# Apply / revert
+# ---------------------------------------------------------------------------
+
+function Invoke-ControlApply {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Ids,
+        [Parameter(Mandatory = $true)]$State,
+        [string]$RunId
+    )
+
+    if (-not $script:RemediationAllowed) { throw 'Remediation is disabled because the self-integrity check failed.' }
+    if (-not $RunId) { $RunId = [Guid]::NewGuid().ToString('N').Substring(0, 12) }
+
+    $applied = @(); $skipped = @()
+    $plan = Get-ChangePlan -Ids $Ids -State $State
+
+    # --- pre-flight safety checks -----------------------------------------
+    # A control can declare evidence that makes applying it risky right now. In the safe
+    # set a tripped check skips the control outright; a user who explicitly named that
+    # control may override it, but only by typing its id.
+    $blocked = @{}
+    foreach ($controlId in (@($plan | Select-Object -ExpandProperty ControlId -Unique))) {
+        $control = Get-Control -Id $controlId
+        $preflight = Get-ControlPreflight -Control $control
+        if (-not $preflight -or -not $preflight.Tripped) { continue }
+
+        Write-Line ''
+        Write-Line ('{0}: {1}' -f $control.Name, $preflight.Message) 'Warn'
+        foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
+            $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
+            $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
+            Write-Line ('{0} ({1}, {2})' -f $d.FileName, $who, $ver) 'Warn' 2
+        }
+
+        $explicitlyRequested = [bool](@($Ids) -contains $controlId)
+        if (-not $explicitlyRequested) {
+            $blocked[$controlId] = 'Skipped for safety: recent driver-compatibility warnings.'
+            Write-Line 'Skipping it. Ask for it by name to override.' 'Info' 2
+            continue
+        }
+        if (-not (Confirm-Action ('Enable {0} anyway?' -f $control.Name) -RequireTyped $controlId)) {
+            $blocked[$controlId] = 'Cancelled: driver-compatibility warnings were not overridden.'
+            Write-Line 'Cancelled.' 'Info' 2
+        }
+    }
+
+    # --- confirmation -----------------------------------------------------
+    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason -and -not $blocked.ContainsKey($_.ControlId) })
+    if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
+        Write-Section 'About to change'
+        foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
+            $control = Get-Control -Id $controlId
+            Write-Line $control.Name 'Info' 2
+            $caution = Get-PropertySafe $control 'Caution' $null
+            if ($caution) { Write-Line $caution 'Warn' 5 }
+        }
+        Write-Line ''
+        Write-Line ('{0} registry value(s) will change. A restart will be needed.' -f @($pending).Count) 'Plain'
+        if (-not (Confirm-Action 'Continue?' -DefaultYes)) {
+            Write-Line 'Cancelled. Nothing was changed.' 'Info'
+            return [pscustomobject]@{ RunId = $RunId; Applied = @(); Skipped = @(); ChangeCount = 0; RestartRequired = $false; Cancelled = $true }
+        }
+    }
+
+    foreach ($row in $plan) {
+        if ($blocked.ContainsKey($row.ControlId)) {
+            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
+                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $blocked[$row.ControlId] }
+            }
+            continue
+        }
+        if ($row.SkipReason) {
+            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
+                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
+            }
+            continue
+        }
+        if (-not $row.NeedsChange) { continue }
+
+        $target = '{0}\{1}' -f $row.Path, $row.Name
+        if (-not $PSCmdlet.ShouldProcess($target, ('Set {0} to {1}' -f $row.Type, $row.DesiredValue))) { continue }
+
+        # Journal first. A crash before the write leaves a harmless no-op entry;
+        # a crash after an unjournalled write leaves an unrevertible change.
+        Write-JournalEntry ([pscustomobject]@{
+            RunId = $RunId
+            Time = (Get-Date).ToUniversalTime().ToString('o')
+            ToolVersion = $script:ToolVersion
+            ControlId = $row.ControlId
+            Path = $row.Path
+            Name = $row.Name
+            Type = $row.Type
+            BeforeExists = $row.CurrentExists
+            BeforeValue = $row.CurrentValue
+            AfterValue = $row.DesiredValue
+        })
+
+        & $script:Registry.SetValue $row.Path $row.Name $row.Type $row.DesiredValue
+
+        $applied += [pscustomobject]@{
+            ControlId = $row.ControlId
+            ControlName = $row.ControlName
+            Path = $row.Path
+            Name = $row.Name
+            Before = if ($row.CurrentExists) { $row.CurrentValue } else { '(not set)' }
+            After = $row.DesiredValue
+        }
+    }
+
+    if ($applied.Count -gt 0) { $script:RestartRequired = $true }
+    $script:AppliedChanges += $applied
+
+    return [pscustomobject]@{
+        RunId = $RunId
+        Applied = $applied
+        Skipped = $skipped
+        ChangeCount = $applied.Count
+        RestartRequired = [bool]($applied.Count -gt 0)
+        Cancelled = $false
+    }
+}
+
+function Invoke-ControlRevert {
+    <#
+        Restores each journalled value in reverse order. A value that did not exist before
+        the run is removed rather than set to zero, so the machine returns to its actual
+        prior state instead of an approximation of it.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$RunId)
+
+    if (-not $RunId) {
+        $runs = Get-JournalRuns
+        if (@($runs).Count -eq 0) { throw 'There is nothing to revert: no changes have been recorded on this computer.' }
+        $RunId = @($runs)[0].RunId
+    }
+
+    $entries = @(Get-Journal -RunId $RunId)
+    if ($entries.Count -eq 0) { throw ("No recorded changes found for run '{0}'." -f $RunId) }
+
+    [array]::Reverse($entries)
+    $reverted = @()
+
+    foreach ($entry in $entries) {
+        $target = '{0}\{1}' -f $entry.Path, $entry.Name
+        if ($entry.BeforeExists) {
+            if (-not $PSCmdlet.ShouldProcess($target, ('Restore to {0}' -f $entry.BeforeValue))) { continue }
+            & $script:Registry.SetValue $entry.Path $entry.Name $entry.Type $entry.BeforeValue
+            $restored = $entry.BeforeValue
         }
         else {
-            $i = [int]$seen[$key]
-            if ($unique[$i].Feature -notmatch [regex]::Escape($item.Feature)) {
-                $unique[$i].Feature = ('{0}; {1}' -f $unique[$i].Feature,$item.Feature)
-            }
+            if (-not $PSCmdlet.ShouldProcess($target, 'Remove value (did not exist before)')) { continue }
+            & $script:Registry.RemoveValue $entry.Path $entry.Name
+            $restored = '(removed)'
         }
+        $reverted += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; RestoredTo = $restored }
     }
+
+    if ($reverted.Count -gt 0) { $script:RestartRequired = $true }
 
     return [pscustomobject]@{
-        Generated = (Get-Date).ToString('s')
-        Target = $Target
-        RegistryChanges = @($unique)
-        Skipped = @($skipped)
-        WouldWriteCount = @($unique | Where-Object {$_.WillChange}).Count
-        RequiresRestart = [bool](@($unique | Where-Object {$_.WillChange}).Count -gt 0)
+        RunId = $RunId
+        Reverted = $reverted
+        ChangeCount = $reverted.Count
+        RestartRequired = [bool]($reverted.Count -gt 0)
     }
 }
 
-function Show-ChangePlan {
-    param([Parameter(Mandatory=$true)]$Plan)
-    Write-Section ('Preview / WhatIf - {0}' -f $Plan.Target)
-    Write-Host 'No Windows security setting is changed in this preview.' -ForegroundColor Green
-    if (@($Plan.RegistryChanges).Count -eq 0) {
-        Write-Host 'No registry change is currently planned.' -ForegroundColor Gray
-    }
-    else {
-        foreach ($item in $Plan.RegistryChanges) {
-            $status = if ($item.WillChange) {'WOULD CHANGE'} else {'already desired value'}
-            $color = if ($item.WillChange) {'Yellow'} else {'DarkGray'}
-            Write-Host ('[{0}] {1}' -f $status,$item.Feature) -ForegroundColor $color
-            Write-Host ('  {0}\{1}' -f $item.Path,$item.Name) -ForegroundColor Gray
-            Write-Host ('  Current: {0}   Proposed: {1}' -f $(if ($null -eq $item.Current) {'<not set>'} else {$item.Current}),$item.Proposed) -ForegroundColor Gray
-            if ($item.Note) { Write-Host ('  Note: {0}' -f $item.Note) -ForegroundColor DarkGray }
-        }
-    }
-    foreach ($skip in $Plan.Skipped) {
-        Write-Host ('[SKIP] {0}: {1}' -f $skip.Feature,$skip.Reason) -ForegroundColor DarkGray
-    }
-}
+# ===== 55-report-text.ps1 =====
+# ---------------------------------------------------------------------------
+# Plain-text report. Another projection over the same data as the HTML and JSON
+# reports, so the three cannot describe the machine differently.
+# ---------------------------------------------------------------------------
 
-function Enable-MemoryIntegrity {
-    param([Parameter(Mandatory=$true)]$State, [switch]$ForceConfirmed, [switch]$FromAllSafe)
-    if (-not (Test-RemediationAllowed)) { return }
-
-    if ($State.Features.MemoryIntegrity.Running) {
-        Write-Host 'Memory Integrity is already running.' -ForegroundColor Green
-        return
-    }
-    if ($State.Features.MemoryIntegrity.ManagedByPolicy) {
-        $reason = 'Memory Integrity/VBS is managed by organization policy.'
-        Write-Host ($reason + ' Local remediation was skipped.') -ForegroundColor Yellow
-        Add-Change 'Memory Integrity' 'Enable' 'Managed by policy' 'Unchanged' 'Skipped - policy managed'
-        Set-OutcomeIssue -Type Policy -Reason $reason
-        return
-    }
-
-    Write-SubSection 'Memory Integrity prerequisites'
-    Write-StatusLine 'CPU virtualization in firmware' ([string]$State.Virtualization.VirtualizationFirmwareEnabled) $(if ($State.Virtualization.VirtualizationFirmwareEnabled) {'Good'} else {'Warn'})
-    Write-StatusLine 'Secure Boot' $(if ($State.Firmware.SecureBootEnabled) {'Enabled'} else {'Disabled / unavailable'}) $(if ($State.Firmware.SecureBootEnabled) {'Good'} else {'Warn'})
-    Write-StatusLine 'SLAT' $State.Virtualization.SLATAssessment
-    Write-Host 'Checking recent Code Integrity / Device Guard diagnostics for driver compatibility evidence...' -ForegroundColor Gray
-    $diagnostics = Get-HvciDiagnostics
-    Show-HvciDiagnostics -Diagnostics $diagnostics
-    Write-Host 'Driver note: the event check cannot prove compatibility of every installed third-party driver.' -ForegroundColor Yellow
-
-    $compatibilityOverrideConfirmed = $false
-    if ($diagnostics.CompatibilityEventCount -gt 0) {
-        $compatReason = ('Recent Code Integrity compatibility events (Event ID 3087) were found: {0}. Review the reported drivers before enabling Memory Integrity.' -f $diagnostics.CompatibilityEventCount)
-        if ($FromAllSafe) {
-            Write-Host 'Enable All Safe will SKIP Memory Integrity because recent driver-compatibility evidence was found.' -ForegroundColor Yellow
-            Add-Change 'Memory Integrity' 'Enable' ([string]$State.Features.MemoryIntegrity.RegistryEnabled) 'Unchanged' 'Skipped - recent HVCI compatibility events require technician review'
-            Set-OutcomeIssue -Type Unsupported -Reason ('Memory Integrity skipped: {0}' -f $compatReason)
-            return
-        }
-        Write-Host $compatReason -ForegroundColor Yellow
-        if (-not $ForceConfirmed) {
-            if (-not (Confirm-Action 'Type HVCI to continue anyway after reviewing the driver evidence, or anything else to cancel' 'HVCI')) { return }
-            $compatibilityOverrideConfirmed = $true
-        }
-    }
-
-    if (-not $ForceConfirmed -and -not $compatibilityOverrideConfirmed) {
-        if (-not (Confirm-Action 'Enable VBS + Memory Integrity without UEFI lock? [Y/N]')) { return }
-    }
-
-    $dgPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
-    $hvciPath = Join-Path $dgPath 'Scenarios\HypervisorEnforcedCodeIntegrity'
-    $before = Get-RegistryValueSafe -Path $hvciPath -Name 'Enabled'
-
-    try {
-        Set-DwordValue -Path $dgPath -Name 'EnableVirtualizationBasedSecurity' -Value 1
-        Set-DwordValue -Path $dgPath -Name 'RequirePlatformSecurityFeatures' -Value 1
-        Set-DwordValue -Path $dgPath -Name 'Locked' -Value 0
-        Set-DwordValue -Path $hvciPath -Name 'Enabled' -Value 1
-        Set-DwordValue -Path $hvciPath -Name 'Locked' -Value 0
-
-        Add-Change 'Memory Integrity' 'Enable VBS + HVCI without UEFI lock' ([string]$before) '1' 'Configuration written; restart verification required'
-        Set-RestartRecommended 'Memory Integrity / HVCI was configured and must be verified after restart.'
-        Write-Host 'Memory Integrity configuration was written successfully.' -ForegroundColor Green
-        Write-Host 'A restart is required before the RUNNING state can be verified.' -ForegroundColor Yellow
-    }
-    catch {
-        $reason = ('Memory Integrity configuration failed: {0}' -f $_.Exception.Message)
-        Write-DebugException -Stage 'Enable Memory Integrity' -ErrorRecord $_
-        Add-Change 'Memory Integrity' 'Enable VBS + HVCI' ([string]$before) 'Unknown' ('FAILED: {0}' -f $_.Exception.Message)
-        Set-OutcomeIssue -Type Failure -Reason $reason
-        Write-Host $reason -ForegroundColor Red
-    }
-}
-
-function Enable-SecureLaunch {
-    param([Parameter(Mandatory=$true)]$State, [switch]$ForceConfirmed, [switch]$FromAllSafe)
-    if (-not (Test-RemediationAllowed)) { return }
-
-    if ($State.Features.SecureLaunch.Running) {
-        Write-Host 'System Guard Secure Launch is already running.' -ForegroundColor Green
-        return
-    }
-    if ($State.Features.SecureLaunch.ManagedByPolicy) {
-        $reason = 'Secure Launch is managed by organization policy.'
-        Write-Host ($reason + ' Local remediation was skipped.') -ForegroundColor Yellow
-        Add-Change 'Secure Launch' 'Enable' 'Managed by policy' 'Unchanged' 'Skipped - policy managed'
-        Set-OutcomeIssue -Type Policy -Reason $reason
-        return
-    }
-    if ($State.Firmware.Type -match 'Legacy') {
-        $reason = 'Secure Launch requires a compatible UEFI platform; this system appears to use Legacy BIOS.'
-        Write-Host $reason -ForegroundColor Yellow
-        if ($FromAllSafe) { Set-OutcomeIssue -Type Unsupported -Reason $reason } else { Set-OutcomeIssue -Type Prerequisite -Reason $reason }
-        return
-    }
-    if (-not $State.TPM.Present -or -not $State.TPM.IsTPM2) {
-        $reason = 'TPM 2.0 is not confirmed; Secure Launch/DRTM cannot be treated as applicable by WinDSH.'
-        Write-Host $reason -ForegroundColor Yellow
-        if ($FromAllSafe) { Set-OutcomeIssue -Type Unsupported -Reason $reason } else { Set-OutcomeIssue -Type Prerequisite -Reason $reason }
-        return
-    }
-
-    Write-SubSection 'Secure Launch prerequisites'
-    Write-StatusLine 'UEFI firmware' $State.Firmware.Type $(if ($State.Firmware.Type -match 'UEFI') {'Good'} else {'Warn'})
-    Write-StatusLine 'TPM 2.0 confirmed' ([string]$State.TPM.IsTPM2) $(if ($State.TPM.IsTPM2) {'Good'} else {'Warn'})
-    Write-StatusLine 'Secure Boot' $(if ($State.Firmware.SecureBootEnabled) {'Enabled'} else {'Disabled / unavailable'}) $(if ($State.Firmware.SecureBootEnabled) {'Good'} else {'Warn'})
-    Write-StatusLine 'CPU virtualization in firmware' ([string]$State.Virtualization.VirtualizationFirmwareEnabled) $(if ($State.Virtualization.VirtualizationFirmwareEnabled) {'Good'} else {'Warn'})
-    Write-Host 'Processor/firmware DRTM support cannot be fully proven by this generic pre-check. Windows decides at boot.' -ForegroundColor DarkGray
-
-    if (-not $ForceConfirmed) {
-        if (-not (Confirm-Action 'Configure System Guard Secure Launch / Firmware protection? [Y/N]')) { return }
-    }
-
-    if (($null -ne $State.Policy.EnableVirtualizationBasedSecurity) -and ($State.Policy.EnableVirtualizationBasedSecurity -eq 0)) {
-        $reason = 'VBS is disabled by organization policy, so Secure Launch cannot be activated by this local tool.'
-        Write-Host $reason -ForegroundColor Yellow
-        Add-Change 'Secure Launch' 'Enable' 'VBS disabled by policy' 'Unchanged' 'Skipped - policy prerequisite blocks activation'
-        Set-OutcomeIssue -Type Policy -Reason $reason
-        return
-    }
-
-    $dgPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
-    $path = Join-Path $dgPath 'Scenarios\SystemGuard'
-    $before = Get-RegistryValueSafe -Path $path -Name 'Enabled'
-    try {
-        if ($null -eq $State.Policy.EnableVirtualizationBasedSecurity) {
-            Set-DwordValue -Path $dgPath -Name 'EnableVirtualizationBasedSecurity' -Value 1
-            Set-DwordValue -Path $dgPath -Name 'RequirePlatformSecurityFeatures' -Value 1
-            Set-DwordValue -Path $dgPath -Name 'Locked' -Value 0
-        }
-        Set-DwordValue -Path $path -Name 'Enabled' -Value 1
-        Add-Change 'Secure Launch' 'Enable SystemGuard scenario' ([string]$before) '1' 'Configuration written; hardware/restart verification required'
-        Set-RestartRecommended 'System Guard Secure Launch was configured and must be verified after restart.'
-        Write-Host 'Secure Launch configuration was written.' -ForegroundColor Green
-        Write-Host 'Windows will activate it only if the processor and firmware satisfy Secure Launch requirements.' -ForegroundColor Yellow
-    }
-    catch {
-        $reason = ('Secure Launch configuration failed: {0}' -f $_.Exception.Message)
-        Write-DebugException -Stage 'Enable Secure Launch' -ErrorRecord $_
-        Add-Change 'Secure Launch' 'Enable' ([string]$before) 'Unknown' ('FAILED: {0}' -f $_.Exception.Message)
-        Set-OutcomeIssue -Type Failure -Reason $reason
-        Write-Host $reason -ForegroundColor Red
-    }
-}
-
-function Enable-CredentialGuardFeature {
-    param([Parameter(Mandatory=$true)]$State, [switch]$ForceConfirmed)
-    if (-not (Test-RemediationAllowed)) { return }
-
-    if ($State.Features.CredentialGuard.Running) { Write-Host 'Credential Guard is already running.' -ForegroundColor Green; return }
-    if ($State.Computer.IsDomainController) {
-        $reason='WinDSH does not enable Credential Guard on domain controllers.'
-        Write-Host $reason -ForegroundColor Yellow
-        Set-OutcomeIssue -Type Prerequisite -Reason $reason
-        return
-    }
-    if (-not $State.Features.CredentialGuard.EditionSupported) {
-        $reason=('Credential Guard local enable action is unavailable for detected edition {0}; WinDSH restricts this action to supported Enterprise/Education editions.' -f $State.Computer.EditionID)
-        Write-Host $reason -ForegroundColor Yellow
-        Set-OutcomeIssue -Type Prerequisite -Reason $reason
-        return
-    }
-    if ($State.Features.CredentialGuard.ManagedByPolicy) {
-        $reason='Credential Guard is managed by organization policy.'
-        Write-Host ($reason + ' Local remediation was skipped.') -ForegroundColor Yellow
-        Add-Change 'Credential Guard' 'Enable' 'Managed by policy' 'Unchanged' 'Skipped - policy managed'
-        Set-OutcomeIssue -Type Policy -Reason $reason
-        return
-    }
-    if (($null -ne $State.Policy.EnableVirtualizationBasedSecurity) -and ($State.Policy.EnableVirtualizationBasedSecurity -eq 0)) {
-        $reason='VBS is disabled by organization policy, so Credential Guard cannot be activated by this local tool.'
-        Write-Host $reason -ForegroundColor Yellow
-        Add-Change 'Credential Guard' 'Enable' 'VBS disabled by policy' 'Unchanged' 'Skipped - policy prerequisite blocks activation'
-        Set-OutcomeIssue -Type Policy -Reason $reason
-        return
-    }
-
-    Write-SubSection 'Credential Guard - advanced compatibility warning'
-    Write-Host 'Credential Guard protects domain credentials using VBS.' -ForegroundColor Gray
-    Write-Host 'It can affect legacy authentication/delegation scenarios, so it remains outside Enable All Safe.' -ForegroundColor Yellow
-    Write-StatusLine 'Secure Boot' $(if ($State.Firmware.SecureBootEnabled) {'Enabled'} else {'Disabled / unavailable'}) $(if ($State.Firmware.SecureBootEnabled) {'Good'} else {'Warn'})
-    Write-StatusLine 'CPU virtualization in firmware' ([string]$State.Virtualization.VirtualizationFirmwareEnabled) $(if ($State.Virtualization.VirtualizationFirmwareEnabled) {'Good'} else {'Warn'})
-
-    if (-not $ForceConfirmed) {
-        if (-not (Confirm-Action 'Type CREDENTIAL to enable Credential Guard WITHOUT UEFI lock, or anything else to cancel' 'CREDENTIAL')) { return }
-    }
-
-    $dgPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
-    $lsaPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
-    $before = Get-RegistryValueSafe -Path $lsaPath -Name 'LsaCfgFlags'
-    try {
-        if ($null -eq $State.Policy.EnableVirtualizationBasedSecurity) {
-            Set-DwordValue -Path $dgPath -Name 'EnableVirtualizationBasedSecurity' -Value 1
-            Set-DwordValue -Path $dgPath -Name 'RequirePlatformSecurityFeatures' -Value 1
-            Set-DwordValue -Path $dgPath -Name 'Locked' -Value 0
-        }
-        Set-DwordValue -Path $lsaPath -Name 'LsaCfgFlags' -Value 2
-        Add-Change 'Credential Guard' 'Enable without UEFI lock' ([string]$before) '2' 'Configuration written; restart verification required'
-        Set-RestartRecommended 'Credential Guard was configured and requires restart.'
-        Write-Host 'Credential Guard was configured without UEFI lock.' -ForegroundColor Green
-        Write-Host 'A restart is required before the RUNNING state can be verified.' -ForegroundColor Yellow
-    }
-    catch {
-        $reason=('Credential Guard configuration failed: {0}' -f $_.Exception.Message)
-        Write-DebugException -Stage 'Enable Credential Guard' -ErrorRecord $_
-        Add-Change 'Credential Guard' 'Enable without UEFI lock' ([string]$before) 'Unknown' ('FAILED: {0}' -f $_.Exception.Message)
-        Set-OutcomeIssue -Type Failure -Reason $reason
-        Write-Host $reason -ForegroundColor Red
-    }
-}
-
-function Enable-VulnerableDriverBlocklist {
-    param([Parameter(Mandatory=$true)]$State, [switch]$ForceConfirmed)
-    if (-not (Test-RemediationAllowed)) { return }
-
-    if ($State.Features.MemoryIntegrity.Running) {
-        Write-Host 'Memory Integrity is running; the Microsoft vulnerable driver blocklist is already enforced with HVCI.' -ForegroundColor Green
-        return
-    }
-    if ($State.Features.VulnerableDriverBlocklist.RegistryValue -eq 1) {
-        Write-Host 'The explicit local Vulnerable Driver Blocklist preference is already enabled.' -ForegroundColor Green
-        return
-    }
-    if (-not $ForceConfirmed) {
-        Write-Host 'This setting can block known vulnerable drivers. Old vendor software or drivers may need updating.' -ForegroundColor Yellow
-        if (-not (Confirm-Action 'Set the explicit local Vulnerable Driver Blocklist preference to enabled? [Y/N]')) { return }
-    }
-
-    $path = 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Config'
-    $before = Get-RegistryValueSafe -Path $path -Name 'VulnerableDriverBlocklistEnable'
-    try {
-        Set-DwordValue -Path $path -Name 'VulnerableDriverBlocklistEnable' -Value 1
-        Add-Change 'Vulnerable Driver Blocklist' 'Enable explicit local preference' ([string]$before) '1' 'Registry value written'
-        Set-RestartRecommended 'Vulnerable Driver Blocklist preference changed; restart is recommended for clean enforcement verification.'
-        Write-Host 'Vulnerable Driver Blocklist local preference was set to enabled.' -ForegroundColor Green
-    }
-    catch {
-        $reason=('Vulnerable Driver Blocklist configuration failed: {0}' -f $_.Exception.Message)
-        Write-DebugException -Stage 'Enable Vulnerable Driver Blocklist' -ErrorRecord $_
-        Add-Change 'Vulnerable Driver Blocklist' 'Enable' ([string]$before) 'Unknown' ('FAILED: {0}' -f $_.Exception.Message)
-        Set-OutcomeIssue -Type Failure -Reason $reason
-        Write-Host $reason -ForegroundColor Red
-    }
-}
-
-function Open-CoreIsolation {
-    try {
-        Start-Process 'windowsdefender://coreisolation/'
-        Write-Host 'Windows Security Core isolation page opened.' -ForegroundColor Green
-        Write-Host 'Use it to review incompatible drivers and Kernel-mode Hardware-enforced Stack Protection when Windows exposes the option.' -ForegroundColor Gray
-    }
-    catch {
-        Write-Host ('Could not open Windows Security Core isolation page: {0}' -f $_.Exception.Message) -ForegroundColor Red
-    }
-}
-
-function Enable-AllRecommended {
-    param([Parameter(Mandatory=$true)]$State, [switch]$ForceConfirmed)
-    if (-not (Test-RemediationAllowed)) { return }
-
-    Write-Section 'Enable All Safe - generic helpdesk remediation'
-    Write-Host 'This action enables every locally applicable Safe protection:' -ForegroundColor White
-    Write-Host '  1. VBS + Memory Integrity / HVCI (without UEFI lock)' -ForegroundColor Gray
-    Write-Host '  2. System Guard Secure Launch / Firmware protection when its basic prerequisites are confirmed' -ForegroundColor Gray
-    Write-Host ''
-    Write-Host 'Unsupported or firmware-dependent actions are skipped and reported; they are not treated as generic failures.' -ForegroundColor Yellow
-    Write-Host 'Credential Guard, Kernel Shadow Stacks, Secure Boot, TPM provisioning and encryption are NOT changed.' -ForegroundColor Yellow
-
-    if (-not $ForceConfirmed) {
-        if (-not (Confirm-Action 'Type ENABLE to continue, or anything else to cancel' 'ENABLE')) { Write-Host 'Cancelled.' -ForegroundColor Gray; return }
-    }
-
-    $miAvailability = Get-MenuActionAvailability -State $State -Key '2'
-    if ($miAvailability.Actionable) {
-        Enable-MemoryIntegrity -State $State -ForceConfirmed -FromAllSafe
-    }
-    else {
-        Write-Host ('Memory Integrity skipped: {0}' -f $miAvailability.Reason) -ForegroundColor DarkGray
-        if ($miAvailability.Category -eq 'Policy') { Set-OutcomeIssue -Type Policy -Reason $miAvailability.Reason }
-        elseif ($miAvailability.Category -eq 'Prerequisite') { Set-OutcomeIssue -Type Unsupported -Reason ('Memory Integrity: {0}' -f $miAvailability.Reason) }
-    }
-
-    $state2 = Get-SystemState
-    $sgAvailability = Get-MenuActionAvailability -State $state2 -Key '3'
-    if ($sgAvailability.Actionable) {
-        Enable-SecureLaunch -State $state2 -ForceConfirmed -FromAllSafe
-    }
-    else {
-        Write-Host ('Secure Launch skipped: {0}' -f $sgAvailability.Reason) -ForegroundColor DarkGray
-        if ($sgAvailability.Category -eq 'Policy') { Set-OutcomeIssue -Type Policy -Reason $sgAvailability.Reason }
-        elseif ($sgAvailability.Category -eq 'Prerequisite') { Set-OutcomeIssue -Type Unsupported -Reason ('Secure Launch: {0}' -f $sgAvailability.Reason) }
-    }
-}
-
-function Get-ReportSummaryRows {
-    param([Parameter(Mandatory=$true)]$State)
-    return @(Get-QuickSummary -State $State | ForEach-Object {
-        [pscustomobject]@{
-            Feature = $_.Name
-            Status = $_.Status
-            Category = $_.Kind
-            Attention = [bool]($_.Kind -eq 'Warn' -or $_.Kind -eq 'Bad' -or $_.Kind -eq 'Unavailable')
-            NextStep = $_.Next
-        }
-    })
-}
-
-function ConvertTo-StateSnapshotLines {
+function New-TextReport {
     param(
-        [Parameter(Mandatory=$true)]$State,
-        [Parameter(Mandatory=$true)][string]$Title
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)]$Statuses,
+        [Parameter(Mandatory = $true)]$Score,
+        [Parameter(Mandatory = $true)]$SecuredCore,
+        [Parameter(Mandatory = $true)]$Cis,
+        [Parameter(Mandatory = $true)]$Explanations
     )
-    $lines = @()
-    $lines += $Title
-    $lines += ('=' * 82)
-    $lines += ('Captured:      {0}' -f $State.Timestamp)
-    $lines += ('Computer:      {0}' -f $State.Computer.Name)
-    $lines += ('Manufacturer:  {0}' -f $State.Computer.Manufacturer)
-    $lines += ('Model:         {0}' -f $State.Computer.Model)
-    $lines += ('Windows:       {0} {1} ({2}) build {3}' -f $State.Computer.ProductName,$State.Computer.DisplayVersion,$State.Computer.EditionID,$State.Computer.Build)
-    $lines += ('Virtual machine detected:             {0}' -f $State.VirtualMachine.Detected)
-    if ($State.VirtualMachine.Detected) { $lines += ('Virtual platform hint:                 {0}' -f $State.VirtualMachine.PlatformHint) }
-    $lines += ''
-    $lines += 'Summary:'
-    foreach ($row in (Get-ReportSummaryRows -State $State)) {
-        $lines += ('  {0,-36} {1}' -f $row.Feature,$row.Status)
-        if (-not [string]::IsNullOrWhiteSpace($row.NextStep)) { $lines += ('    Next: {0}' -f $row.NextStep) }
-    }
-    $lines += ''
-    $lines += 'Firmware / hardware:'
-    $lines += ('  Firmware type:                       {0}' -f $State.Firmware.Type)
-    $lines += ('  Secure Boot supported:               {0}' -f $State.Firmware.SecureBootSupported)
-    $lines += ('  Secure Boot enabled:                 {0}' -f $State.Firmware.SecureBootEnabled)
-    $lines += ('  TPM present:                         {0}' -f $State.TPM.Present)
-    $lines += ('  TPM ready:                           {0}' -f $State.TPM.Ready)
-    $lines += ('  TPM spec version:                    {0}' -f $State.TPM.SpecVersion)
-    $lines += ('  TPM 2.0 confirmed:                   {0}' -f $State.TPM.IsTPM2)
-    $lines += ('  Virtualization firmware enabled:     {0}' -f $State.Virtualization.VirtualizationFirmwareEnabled)
-    $lines += ('  Hypervisor present:                  {0}' -f $State.Virtualization.HypervisorPresent)
-    $lines += ('  SLAT:                                {0}' -f $State.Virtualization.SLATAssessment)
-    $lines += ('  Kernel DMA capability:               {0}' -f $State.HardwareCapabilities.DMACapability)
-    $lines += ('  Secure memory overwrite capability:  {0}' -f $State.HardwareCapabilities.SecureMemoryOverwrite)
-    $lines += ('  NX capability:                       {0}' -f $State.HardwareCapabilities.NXAvailable)
-    $lines += ('  SMM mitigations:                     {0}' -f $State.HardwareCapabilities.SMMMitigations)
-    $lines += ('  MBEC/GMET:                           {0}' -f $State.HardwareCapabilities.MBECorGMET)
-    $lines += ('  APIC virtualization:                 {0}' -f $State.HardwareCapabilities.APICVirtualization)
-    $lines += ''
-    $lines += 'VBS / Device Security:'
-    $lines += ('  VBS:                                 {0}' -f $State.VBS.Status)
-    $lines += ('  VBS registry enabled:                {0}' -f $State.VBS.RegistryEnabled)
-    $lines += ('  RequirePlatformSecurityFeatures:     {0}' -f $State.VBS.RequirePlatformSecurityFeatures)
-    $lines += ('  Memory Integrity configured:         {0}' -f $State.Features.MemoryIntegrity.Configured)
-    $lines += ('  Memory Integrity running:            {0}' -f $State.Features.MemoryIntegrity.Running)
-    $lines += ('  Secure Launch configured:            {0}' -f $State.Features.SecureLaunch.Configured)
-    $lines += ('  Secure Launch running:               {0}' -f $State.Features.SecureLaunch.Running)
-    $lines += ('  Credential Guard edition supported:  {0}' -f $State.Features.CredentialGuard.EditionSupported)
-    $lines += ('  Credential Guard configured:         {0}' -f $State.Features.CredentialGuard.Configured)
-    $lines += ('  Credential Guard running:            {0}' -f $State.Features.CredentialGuard.Running)
-    $lines += ('  Credential Guard LsaCfgFlags:        {0}' -f $State.Features.CredentialGuard.LsaCfgFlags)
-    $lines += ('  SMM Measurement configured:          {0}' -f $State.Features.SMMFirmwareMeasurement.Configured)
-    $lines += ('  SMM Measurement running:             {0}' -f $State.Features.SMMFirmwareMeasurement.Running)
-    $lines += ('  Kernel Stack configured:             {0}' -f $State.Features.KernelStackProtection.Configured)
-    $lines += ('  Kernel Stack running:                {0}' -f $State.Features.KernelStackProtection.Running)
-    $lines += ('  Kernel Stack audit mode:             {0}' -f $State.Features.KernelStackProtection.AuditMode)
-    $lines += ('  HSPT configured:                     {0}' -f $State.Features.HypervisorEnforcedPagingTranslation.Configured)
-    $lines += ('  HSPT running:                        {0}' -f $State.Features.HypervisorEnforcedPagingTranslation.Running)
-    $lines += ('  Vulnerable Driver Blocklist:         {0}' -f $State.Features.VulnerableDriverBlocklist.EffectiveAssessment)
-    $lines += ''
-    $lines += 'Policy ownership:'
-    $lines += ('  Policy VBS:                          {0}' -f $State.Policy.EnableVirtualizationBasedSecurity)
-    $lines += ('  Policy HVCI:                         {0}' -f $State.Policy.HypervisorEnforcedCodeIntegrity)
-    $lines += ('  Policy Secure Launch:                {0}' -f $State.Policy.ConfigureSystemGuardLaunch)
-    $lines += ('  Policy Credential Guard:             {0}' -f $State.Policy.CredentialGuardLsaCfgFlags)
-    $lines += ''
-    $lines += 'Unavailable / not-confirmed capabilities:'
-    $unsupported = @(Get-UnsupportedCapabilities -State $State)
-    if ($unsupported.Count -eq 0) { $lines += '  None identified by WinDSH.' }
-    else { foreach ($u in $unsupported) { $lines += ('  - {0}: {1}. {2}' -f $u.Feature,$u.Status,$u.Reason) } }
-    return $lines
-}
-
-function ConvertTo-StateText {
-    param([Parameter(Mandatory=$true)]$State)
 
     $lines = @()
-    $lines += 'WinDSH - Windows Device Security Assessment'
-    $lines += ('Tool version:   {0}' -f $script:ToolVersion)
-    $lines += ('Schema version: {0}' -f $script:SchemaVersion)
-    $lines += $script:ContactEmail
-    if ($script:IntegrityState) {
-        $lines += ('Integrity:      {0}' -f $script:IntegrityState.Status)
-        $lines += ('Integrity SHA-256 (normalized): {0}' -f $script:IntegrityState.ActualHash)
-    }
-    $lines += ('Generated:      {0}' -f (Get-Date).ToString('s'))
+    $rule = '-' * 78
+    $lines += $rule
+    $lines += ('{0} {1} - Windows device security report' -f $script:ToolName, $script:ToolVersion)
+    $lines += ('Computer  : {0}' -f $State.Computer.Name)
+    $lines += ('Generated : {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+    $lines += $rule
     $lines += ''
 
-    $initial = if ($script:InitialState) { $script:InitialState } else { $State }
-    $lines += @(ConvertTo-StateSnapshotLines -State $initial -Title 'INITIAL STATE')
+    $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
+    $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
+    $lines += 'SECURITY SCORE'
+    $lines += ('  {0} / 100 ({1})' -f $Score.Score, $Score.Grade)
+    $lines += ('  {0} of {1} applicable protections are active.' -f $running, $countable)
+    if ($Score.ExcludedCount -gt 0) {
+        $lines += ('  {0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount)
+    }
+    $lines += ('  Secured-core PC: {0}' -f $(if ($SecuredCore.Qualifies) { 'qualifies' } else { ('does not qualify, {0} requirement(s) unmet' -f $SecuredCore.UnmetCount) }))
+    $lines += ''
 
-    if ($script:FinalState -and ($script:FinalState.Timestamp -ne $initial.Timestamp -or @($script:Changes).Count -gt 0 -or @($script:PlannedChanges).Count -gt 0)) {
+    $lines += 'THIS COMPUTER'
+    $lines += ('  Make and model  : {0} {1}' -f $State.Computer.Manufacturer, $State.Computer.Model)
+    $lines += ('  Processor       : {0}' -f $State.Computer.ProcessorName)
+    $lines += ('  Windows         : {0} build {1} ({2})' -f $State.Computer.OsCaption, $State.Computer.BuildNumber, $State.Computer.EditionId)
+    $lines += ('  Firmware mode   : {0} (detected via {1})' -f $State.Firmware.Mode, $State.Firmware.DetectionSource)
+    $lines += ('  Secure Boot     : {0}' -f (Format-Bool $State.Firmware.SecureBootEnabled 'Enabled' 'Disabled' 'Unavailable'))
+    $lines += ('  TPM             : {0} (spec {1})' -f (Format-Bool $State.Tpm.IsTPM2 'TPM 2.0 present' 'not confirmed'), $State.Tpm.SpecVersion)
+    $lines += ('  Hypervisor      : launch type {0}' -f $State.HypervisorLaunch.LaunchType)
+    $lines += ('  DEP             : {0}' -f $State.Dep.Text)
+    $lines += ('  Restart pending : {0}' -f (Format-Bool $State.Restart.Pending))
+    if ($State.VirtualMachine.IsVirtual) {
+        $lines += ('  Virtual machine : yes ({0})' -f $State.VirtualMachine.Platform)
+        foreach ($note in (ConvertTo-Array $State.VirtualMachine.Notes)) { $lines += ('      - {0}' -f $note) }
+    }
+    $lines += ''
+
+    if ($State.HypervisorLaunch.BlocksVbs) {
+        $lines += 'BLOCKING ISSUE'
+        $lines += '  The Windows hypervisor is switched off in the boot configuration, so none of the'
+        $lines += '  virtualization-based protections can start, whatever else is configured.'
+        $lines += '  Fix: run  bcdedit /set hypervisorlaunchtype Auto  elevated, then restart.'
         $lines += ''
-        $lines += @(ConvertTo-StateSnapshotLines -State $script:FinalState -Title 'FINAL / CURRENT STATE')
     }
 
+    $lines += 'PROTECTIONS'
+    foreach ($s in $Statuses) {
+        $marker = switch ($s.State) {
+            'Running' { '[ OK ]' }
+            'ConfiguredNotRunning' { '[ !  ]' }
+            'NotConfigured' { '[ X  ]' }
+            default { '[ -  ]' }
+        }
+        $label = (Get-StateLabel $s.State).Text
+        $policy = if ($s.ManagedByPolicy) { ' (Group Policy)' } else { '' }
+        $lines += ('  {0} {1,-34} {2}{3}' -f $marker, $s.PlainName, $label, $policy)
+        $lines += ('         {0}' -f $s.Name)
+    }
     $lines += ''
-    $lines += 'BIOS / UEFI ACTIONS (CURRENT STATE)'
-    $lines += ('=' * 82)
-    $firmwareActions = @(Get-FirmwareActions -State $State)
-    if ($firmwareActions.Count -eq 0) { $lines += 'No obvious firmware action is required from the checks available to WinDSH.' }
+
+    $todo = @($Explanations | Where-Object { $_.Severity -ne 'Good' })
+    $lines += 'WHAT TO DO NEXT'
+    if (@($todo).Count -eq 0) { $lines += '  Nothing. Every protection this computer supports is already active.' }
     else {
-        foreach ($item in $firmwareActions) {
-            $lines += ('- {0}' -f $item.Item)
-            $lines += ('  Current: {0}' -f $item.Current)
-            $lines += ('  Why:     {0}' -f $item.Needed)
-            $lines += ('  Action:  {0}' -f $item.Action)
+        $n = 0
+        foreach ($e in $todo) {
+            $n++
+            $lines += ''
+            $lines += ('  {0}. {1}' -f $n, $e.PlainName)
+            $lines += ('     {0}' -f $e.Verdict)
+            if ($e.Action) { foreach ($l in ($e.Action -split "`n")) { $lines += ('     {0}' -f $l) } }
         }
     }
+    $lines += ''
 
-    if (@($script:PlannedChanges).Count -gt 0) {
+    $lines += 'CIS BENCHMARK COMPARISON'
+    $lines += ('  {0}, section {1}' -f $Cis.Benchmark, $Cis.Section)
+    $lines += ('  {0} of {1} checks pass.' -f $Cis.CompliantCount, $Cis.TotalCount)
+    $lines += ''
+    $lines += '  IMPORTANT: CIS audits the Group Policy hive. WinDSH configures local machine'
+    $lines += '  values and never writes Group Policy, so a protection can be active on this'
+    $lines += '  computer while its CIS check still reports non-compliant.'
+    $lines += ''
+    foreach ($r in $Cis.Rows) {
+        $verdict = if ($r.Compliant) { 'PASS' } else { 'FAIL' }
+        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $lines += ('  {0} {1,-9} {2,-38} policy = {3}, running = {4}' -f `
+            $verdict, $r.CisId, $r.PolicyValueName, $actual, (Format-Bool $r.FeatureRunning))
+        if ($r.Divergence) { $lines += ('           Deliberate difference: {0}' -f $r.Divergence) }
+    }
+    $lines += ''
+
+    $lines += 'SECURED-CORE PC CRITERIA'
+    foreach ($c in $SecuredCore.Checks) {
+        $lines += ('  {0} {1}' -f $(if ($c.Met) { '[ OK ]' } else { '[ X  ]' }), $c.Name)
+    }
+    $lines += ''
+
+    if (@($script:AppliedChanges).Count -gt 0) {
+        $lines += 'CHANGES MADE IN THIS SESSION'
+        foreach ($c in $script:AppliedChanges) {
+            $lines += ('  {0}\{1}: {2} -> {3}' -f $c.Path, $c.Name, $c.Before, $c.After)
+        }
         $lines += ''
-        $lines += 'PREVIEW / WHATIF PLAN'
-        $lines += ('=' * 82)
-        foreach ($plan in $script:PlannedChanges) {
-            $lines += ('Target: {0}; would-write count: {1}; restart if applied: {2}' -f $plan.Target,$plan.WouldWriteCount,$plan.RequiresRestart)
-            foreach ($item in $plan.RegistryChanges) {
-                $lines += ('  [{0}] {1}: {2}\{3}; Current={4}; Proposed={5}' -f $(if ($item.WillChange){'WOULD CHANGE'}else{'NO CHANGE'}),$item.Feature,$item.Path,$item.Name,$(if ($null -eq $item.Current){'<not set>'}else{$item.Current}),$item.Proposed)
-            }
-            foreach ($skip in $plan.Skipped) { $lines += ('  [SKIP] {0}: {1}' -f $skip.Feature,$skip.Reason) }
-        }
     }
 
-    if ($script:LastHvciDiagnostics) {
-        $lines += ''
-        $lines += 'HVCI / MEMORY INTEGRITY DRIVER DIAGNOSTICS'
-        $lines += ('=' * 82)
-        $lines += $script:LastHvciDiagnostics.Assessment
-        $lines += ('Compatibility Event 3087 count: {0}' -f $script:LastHvciDiagnostics.CompatibilityEventCount)
-        foreach ($driver in $script:LastHvciDiagnostics.CandidateDriverReferences) { $lines += ('  Driver/file reference: {0}' -f $driver) }
-    }
+    $lines += $rule
+    $lines += 'This report describes configuration state only. It is not a vulnerability assessment.'
+    $lines += 'WinDSH writes local machine settings and never modifies Group Policy.'
+    $lines += $rule
 
-    $lines += ''
-    $lines += 'CHANGES MADE IN THIS RUN'
-    $lines += ('=' * 82)
-    if (@($script:Changes).Count -eq 0) { $lines += 'None.' }
-    else { foreach ($c in $script:Changes) { $lines += ('[{0}] {1}: {2}; Before={3}; After={4}; Result={5}' -f $c.Time,$c.Feature,$c.Action,$c.Before,$c.After,$c.Result) } }
-
-    $lines += ''
-    $lines += 'RUN OUTCOME / AUTOMATION CONTRACT'
-    $lines += ('=' * 82)
-    $lines += ('Last calculated exit code:             {0}' -f $script:LastExitCode)
-    $lines += ('Meaning:                               {0}' -f (Get-ExitCodeMeaning -Code $script:LastExitCode))
-    $lines += ('Restart recommended by this run:       {0}' -f $script:RestartRecommended)
-    foreach ($reason in $script:RestartReasons) { $lines += ('  Restart reason: {0}' -f $reason) }
-    foreach ($reason in $script:Outcome.PolicyReasons) { $lines += ('  Policy block: {0}' -f $reason) }
-    foreach ($reason in $script:Outcome.PrerequisiteReasons) { $lines += ('  Missing prerequisite: {0}' -f $reason) }
-    foreach ($reason in $script:Outcome.UnsupportedSkipped) { $lines += ('  Unsupported/skipped: {0}' -f $reason) }
-    foreach ($reason in $script:Outcome.FailureReasons) { $lines += ('  Failure: {0}' -f $reason) }
-
-    $lines += ''
-    $lines += 'IMPORTANT NOTES'
-    $lines += '- Secure Boot, CPU virtualization, TPM firmware state and IOMMU/VT-d are firmware/platform settings. WinDSH reports them but does not force them.'
-    $lines += '- Kernel DMA Protection is automatically managed by Windows on supported platforms; it is not treated as a generic software toggle.'
-    $lines += '- HVCI event diagnostics provide evidence from Windows logs, not a guarantee that every installed driver is compatible.'
-    $lines += '- Kernel-mode Hardware-enforced Stack Protection is audited but not force-enabled through undocumented registry changes.'
-    $lines += '- Re-run WinDSH after restart to verify that CONFIGURED protections actually become RUNNING.'
-    $lines += '- Drive/device encryption is intentionally outside WinDSH.'
-
-    return ($lines -join [Environment]::NewLine)
+    return ($lines -join "`r`n")
 }
 
-function Save-Report {
+# ===== 60-report-html.ps1 =====
+# ---------------------------------------------------------------------------
+# HTML report. Self-contained single file: no external CSS, fonts, scripts or images,
+# so it renders identically on a machine with no internet access and can be attached to
+# a ticket or emailed without anything breaking.
+# ---------------------------------------------------------------------------
+
+function ConvertTo-HtmlText {
+    param([string]$Text)
+    if ($null -eq $Text) { return '' }
+    return ([string]$Text).
+        Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').
+        Replace('"', '&quot;').Replace("'", '&#39;')
+}
+
+function Get-StateLabel {
+    param([string]$State)
+    switch ($State) {
+        'Running' { return @{ Text = 'Active'; Class = 'ok' } }
+        'ConfiguredNotRunning' { return @{ Text = 'Needs restart or unsupported'; Class = 'warn' } }
+        'NotConfigured' { return @{ Text = 'Off'; Class = 'bad' } }
+        'NotSupported' { return @{ Text = 'Not available on this PC'; Class = 'na' } }
+        default { return @{ Text = $State; Class = 'na' } }
+    }
+}
+
+function New-HtmlReport {
     param(
-        [Parameter(Mandatory=$true)]$State,
-        [ValidateSet('Text','Json')][string]$Format
-    )
-    $root = Initialize-ReportFolder
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $safeComputer = ($State.Computer.Name -replace '[^A-Za-z0-9_.-]','_')
-    $base = 'WinDSH-{0}-{1}' -f $safeComputer,$stamp
-
-    if ($Format -eq 'Text') {
-        $path = Join-Path $root ($base + '.txt')
-        $text = ConvertTo-StateText -State $State
-        [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))
-        $script:LastReportPath = $path
-        if (-not $script:RmmMode) { Write-Host ('Plain-text report saved: {0}' -f $path) -ForegroundColor Green }
-        return $path
-    }
-
-    $jsonPath = Join-Path $root ($base + '.json')
-    $initial = if ($script:InitialState) { $script:InitialState } else { $State }
-    $final = if ($script:FinalState) { $script:FinalState } else { $State }
-    $reportObject = [pscustomobject]@{
-        SchemaVersion = $script:SchemaVersion
-        Tool = [pscustomobject]@{ Name=$script:ToolName; Version=$script:ToolVersion; Contact=$script:ContactEmail; Integrity=$script:IntegrityState }
-        Generated = (Get-Date).ToString('s')
-        ExitCode = $script:LastExitCode
-        ExitMeaning = Get-ExitCodeMeaning -Code $script:LastExitCode
-        Outcome = [pscustomobject]$script:Outcome
-        InitialState = $initial
-        FinalState = $final
-        Summary = Get-ReportSummaryRows -State $final
-        FirmwareActions = @(Get-FirmwareActions -State $final)
-        UnsupportedCapabilities = @(Get-UnsupportedCapabilities -State $final)
-        HVCIDiagnostics = $script:LastHvciDiagnostics
-        PlannedChanges = @($script:PlannedChanges)
-        Restart = [pscustomobject]@{
-            RecommendedByThisRun = $script:RestartRecommended
-            Reasons = @($script:RestartReasons)
-            WindowsPendingRestart = $final.Restart.Pending
-        }
-        Changes = @($script:Changes)
-    }
-    $json = $reportObject | ConvertTo-Json -Depth 14
-    [IO.File]::WriteAllText($jsonPath, $json, (New-Object Text.UTF8Encoding($false)))
-    $script:LastReportPath = $jsonPath
-    if (-not $script:RmmMode) { Write-Host ('JSON report saved: {0}' -f $jsonPath) -ForegroundColor Green }
-    return $jsonPath
-}
-
-function Select-ReportFormatInteractive {
-    Write-Host ''
-    $choice = Read-Host 'Report format: [T]ext or [J]SON? (default: Text)'
-    if ([string]::IsNullOrWhiteSpace($choice)) { return 'Text' }
-    if ($choice.Trim().ToUpperInvariant().StartsWith('J')) { return 'Json' }
-    return 'Text'
-}
-
-function Get-InteractiveOutcomeExitCode {
-    if ($script:Outcome.IntegrityFailed) { return 3 }
-    if ($script:Outcome.RemediationFailed) { return 5 }
-    if ($script:Outcome.PolicyBlocked) { return 2 }
-    if ($script:RestartRecommended) { return 3010 }
-    return 0
-}
-
-function Save-ReportInteractive {
-    param([Parameter(Mandatory=$true)]$State)
-    $script:LastExitCode = Get-InteractiveOutcomeExitCode
-    $format = Select-ReportFormatInteractive
-    [void](Save-Report -State $State -Format $format)
-}
-
-function Show-RestartSummary {
-    param([Parameter(Mandatory=$true)]$State)
-    if (-not $script:RestartRecommended -and -not $State.Restart.Pending) { return }
-
-    Write-Section 'Restart status'
-    if ($script:RestartRecommended) {
-        Write-Host 'A restart is recommended/required for changes made by this tool:' -ForegroundColor Yellow
-        foreach ($reason in $script:RestartReasons) {
-            Write-Host ('  - {0}' -f $reason) -ForegroundColor Yellow
-        }
-    }
-    if ($State.Restart.Pending) {
-        Write-Host 'Windows also reports an existing pending restart condition.' -ForegroundColor Yellow
-    }
-    Write-Host 'After restart, run the audit again to verify that configured protections show RUNNING.' -ForegroundColor Gray
-}
-
-function Invoke-InteractiveExit {
-    param([Parameter(Mandatory=$true)]$State)
-
-    $finalState = Get-SystemState
-    $script:FinalState = $finalState
-    $script:LastExitCode = Get-InteractiveOutcomeExitCode
-    if (@($script:Changes).Count -gt 0) {
-        Write-Host ''
-        if (Confirm-Action 'Save a final report of this session? [Y/n]' 'Y' -DefaultYes) { Save-ReportInteractive -State $finalState }
-    }
-
-    Show-RestartSummary -State $finalState
-    if ($script:RestartRecommended -or $finalState.Restart.Pending) {
-        Write-Host ''
-        Write-Host 'Restarting will close applications. Save your work first.' -ForegroundColor Yellow
-        if (Confirm-Action 'Restart Windows now? [y/N]' 'Y') { Restart-Computer -Force; return }
-    }
-}
-
-function Read-MenuChoice {
-    param(
-        [string]$Prompt = 'Select an action (single key): ',
-        [string]$ValidChoices = '12345678PARQ'
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)]$Statuses,
+        [Parameter(Mandatory = $true)]$Score,
+        [Parameter(Mandatory = $true)]$SecuredCore,
+        [Parameter(Mandatory = $true)]$Cis,
+        [Parameter(Mandatory = $true)]$Explanations
     )
 
-    Write-Host -NoNewline $Prompt
-    while ($true) {
-        try {
-            $keyInfo = [Console]::ReadKey($true)
-            $choice = [string]$keyInfo.KeyChar
-            if ([string]::IsNullOrEmpty($choice)) { continue }
-            $choice = $choice.Substring(0,1).ToUpperInvariant()
-            if ($ValidChoices.IndexOf($choice) -ge 0) { Write-Host $choice; return $choice }
+    $generated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $scoreColour = if ($Score.Score -ge 90) { '#1a7f43' } elseif ($Score.Score -ge 75) { '#2f855a' } elseif ($Score.Score -ge 50) { '#b7791f' } else { '#c53030' }
+
+    # Donut geometry: circumference of r=70 is 2*pi*70.
+    $circumference = [math]::Round(2 * [math]::PI * 70, 2)
+    $filled = [math]::Round($circumference * ($Score.Score / 100.0), 2)
+    $gap = [math]::Round($circumference - $filled, 2)
+
+    $sb = New-Object Text.StringBuilder
+    $null = $sb.AppendLine('<!DOCTYPE html>')
+    $null = $sb.AppendLine('<html lang="en"><head><meta charset="utf-8">')
+    $null = $sb.AppendLine('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    $null = $sb.AppendLine(('<title>WinDSH security report - {0}</title>' -f (ConvertTo-HtmlText $State.Computer.Name)))
+    $null = $sb.AppendLine(@'
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1a202c;--muted:#5a6472;--line:#e2e6ec;
+--ok:#1a7f43;--warn:#b7791f;--bad:#c53030;--na:#718096;}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--ink:#e8eaed;
+--muted:#9aa4b2;--line:#2d333d;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--na:#94a3b8;}}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--ink);
+font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 12px;
+padding-bottom:6px;border-bottom:2px solid var(--line)}
+.sub{color:var(--muted);font-size:13px;margin-bottom:24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:16px}
+.hero{display:flex;gap:28px;align-items:center;flex-wrap:wrap}
+.gauge{flex:0 0 180px;text-align:center}
+.gv{font-size:40px;font-weight:700;line-height:1}
+.gl{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.hero-txt{flex:1;min-width:260px}
+.verdict{font-size:17px;margin:0 0 8px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap}
+.ok{background:rgba(26,127,67,.13);color:var(--ok)}
+.warn{background:rgba(183,121,31,.15);color:var(--warn)}
+.bad{background:rgba(197,48,48,.13);color:var(--bad)}
+.na{background:rgba(113,128,150,.15);color:var(--na)}
+.kv{display:grid;grid-template-columns:200px 1fr;gap:6px 16px;font-size:14px}
+.kv dt{color:var(--muted)}.kv dd{margin:0}
+.note{background:rgba(183,121,31,.1);border-left:3px solid var(--warn);padding:12px 14px;
+border-radius:0 6px 6px 0;font-size:14px;margin:12px 0}
+.item{border-top:1px solid var(--line);padding:14px 0}
+.item:first-child{border-top:0}
+.item h3{margin:0 0 4px;font-size:15px}
+.why{color:var(--muted);font-size:13.5px;margin:4px 0}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;
+font-size:12.5px;white-space:pre-wrap;word-break:break-word;margin:8px 0 0}
+.tiny{font-size:12px;color:var(--muted)}
+a{color:inherit}
+@media print{body{background:#fff;padding:0}.card{break-inside:avoid;border-color:#ccc}}
+</style></head><body><div class="wrap">
+'@)
+
+    # ---- header + score ----
+    $null = $sb.AppendLine(('<h1>Windows device security report</h1>'))
+    $null = $sb.AppendLine(('<div class="sub">{0} &middot; generated {1} &middot; {2} {3}</div>' -f `
+        (ConvertTo-HtmlText $State.Computer.Name), (ConvertTo-HtmlText $generated),
+        (ConvertTo-HtmlText $script:ToolName), (ConvertTo-HtmlText $script:ToolVersion)))
+
+    $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
+    $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
+
+    $null = $sb.AppendLine('<div class="card hero">')
+    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Security score">')
+    $null = $sb.AppendLine('<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>')
+    $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filled, $gap))
+    $null = $sb.AppendLine(('<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">{0}</text>' -f $Score.Score))
+    $null = $sb.AppendLine('<text x="90" y="108" text-anchor="middle" font-size="13" fill="currentColor" opacity="0.65">out of 100</text>')
+    $null = $sb.AppendLine('</svg>')
+    $null = $sb.AppendLine(('<div class="gl">{0}</div></div>' -f (ConvertTo-HtmlText $Score.Grade)))
+
+    $null = $sb.AppendLine('<div class="hero-txt">')
+    $null = $sb.AppendLine(('<p class="verdict">{0} of {1} applicable protections are active on this computer.</p>' -f $running, $countable))
+    if ($Score.ExcludedCount -gt 0) {
+        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because this hardware cannot run them. They are not counted against you.</p>' -f $Score.ExcludedCount))
+    }
+    $scVerdict = if ($SecuredCore.Qualifies) { 'This computer meets the Secured-core PC criteria.' } else { ('This computer does not meet the Secured-core PC criteria ({0} requirement(s) unmet).' -f $SecuredCore.UnmetCount) }
+    $null = $sb.AppendLine(('<p class="tiny">{0}</p>' -f (ConvertTo-HtmlText $scVerdict)))
+    $null = $sb.AppendLine('</div></div>')
+
+    # ---- system ----
+    $null = $sb.AppendLine('<h2>This computer</h2><div class="card"><dl class="kv">')
+    $rows = @(
+        @{ K = 'Computer name'; V = $State.Computer.Name }
+        @{ K = 'Make and model'; V = ('{0} {1}' -f $State.Computer.Manufacturer, $State.Computer.Model) }
+        @{ K = 'Processor'; V = $State.Computer.ProcessorName }
+        @{ K = 'Windows'; V = ('{0} (build {1})' -f $State.Computer.OsCaption, $State.Computer.BuildNumber) }
+        @{ K = 'Edition'; V = $State.Computer.EditionId }
+        @{ K = 'Firmware mode'; V = $State.Firmware.Mode }
+        @{ K = 'Secure Boot'; V = (Format-Bool $State.Firmware.SecureBootEnabled 'Enabled' 'Disabled' 'Unavailable') }
+        @{ K = 'TPM 2.0'; V = (Format-Bool $State.Tpm.IsTPM2 'Present' 'Not confirmed') }
+        @{ K = 'Hypervisor launch type'; V = $(if ($State.HypervisorLaunch.LaunchType) { $State.HypervisorLaunch.LaunchType } else { 'Unknown' }) }
+        @{ K = 'Virtual machine'; V = (Format-Bool $State.Computer.IsVirtual) }
+        @{ K = 'Restart pending'; V = (Format-Bool $State.Restart.Pending) }
+    )
+    foreach ($r in $rows) {
+        $null = $sb.AppendLine(('<dt>{0}</dt><dd>{1}</dd>' -f (ConvertTo-HtmlText $r.K), (ConvertTo-HtmlText ([string]$r.V))))
+    }
+    $null = $sb.AppendLine('</dl></div>')
+
+    if ($State.HypervisorLaunch.BlocksVbs) {
+        $null = $sb.AppendLine('<div class="note"><strong>Blocking issue.</strong> The Windows hypervisor is switched off in this computer&#39;s boot configuration, so none of the virtualization-based protections can start, whatever else is configured. In an elevated Command Prompt run <code>bcdedit /set hypervisorlaunchtype Auto</code> and restart.</div>')
+    }
+
+    # ---- protections ----
+    $null = $sb.AppendLine('<h2>Protections</h2><div class="card"><table><thead><tr>')
+    $null = $sb.AppendLine('<th>Protection</th><th>What it does</th><th>Status</th><th>Points</th></tr></thead><tbody>')
+    foreach ($s in $Statuses) {
+        $label = Get-StateLabel $s.State
+        $control = Get-Control -Id $s.Id
+        $pts = @($Score.Breakdown | Where-Object { $_.Id -eq $s.Id })
+        $ptsText = if (@($pts).Count -gt 0 -and $pts[0].Counted) { '{0} / {1}' -f $pts[0].Points, $s.Weight } else { 'n/a' }
+        $policy = if ($s.ManagedByPolicy) { ' <span class="badge na">Group Policy</span>' } else { '' }
+        $null = $sb.AppendLine(('<tr><td><strong>{0}</strong><br><span class="tiny">{1}</span></td><td>{2}</td><td><span class="badge {3}">{4}</span>{5}</td><td>{6}</td></tr>' -f `
+            (ConvertTo-HtmlText $s.PlainName), (ConvertTo-HtmlText $s.Name), (ConvertTo-HtmlText $control.Summary),
+            $label.Class, (ConvertTo-HtmlText $label.Text), $policy, $ptsText))
+    }
+    $null = $sb.AppendLine('</tbody></table></div>')
+
+    # ---- what to do ----
+    $todo = @($Explanations | Where-Object { $_.Severity -ne 'Good' })
+    $null = $sb.AppendLine('<h2>What to do next</h2><div class="card">')
+    if (@($todo).Count -eq 0) {
+        $null = $sb.AppendLine('<p>Nothing. Every protection this computer supports is already active.</p>')
+    }
+    else {
+        foreach ($e in $todo) {
+            $null = $sb.AppendLine('<div class="item">')
+            $null = $sb.AppendLine(('<h3>{0}</h3>' -f (ConvertTo-HtmlText $e.PlainName)))
+            $null = $sb.AppendLine(('<p class="why">{0}</p>' -f (ConvertTo-HtmlText $e.Verdict)))
+            if ($e.Action) { $null = $sb.AppendLine(('<pre>{0}</pre>' -f (ConvertTo-HtmlText $e.Action))) }
+            if ($e.Caution) { $null = $sb.AppendLine(('<p class="tiny"><strong>Note:</strong> {0}</p>' -f (ConvertTo-HtmlText $e.Caution))) }
+            $null = $sb.AppendLine('</div>')
         }
-        catch {
-            Write-DebugException -Stage 'Read single-key menu choice' -ErrorRecord $_
-            Write-Host ''
-            $fallback = Read-Host ($Prompt.TrimEnd())
-            if ([string]::IsNullOrWhiteSpace($fallback)) { Write-Host -NoNewline $Prompt; continue }
-            $choice = $fallback.Trim().Substring(0,1).ToUpperInvariant()
-            if ($ValidChoices.IndexOf($choice) -ge 0) { return $choice }
-            Write-Host -NoNewline $Prompt
+    }
+    $null = $sb.AppendLine('</div>')
+
+    # ---- CIS ----
+    $null = $sb.AppendLine(('<h2>CIS Benchmark comparison</h2>'))
+    $null = $sb.AppendLine('<div class="card">')
+    $null = $sb.AppendLine(('<p class="tiny">{0} &middot; section {1}</p>' -f (ConvertTo-HtmlText $Cis.Benchmark), (ConvertTo-HtmlText $Cis.Section)))
+    $null = $sb.AppendLine(('<div class="note"><strong>Read this before using these results.</strong> {0}</div>' -f (ConvertTo-HtmlText $Cis.Note)))
+    $null = $sb.AppendLine(('<p>{0} of {1} checks pass. {2} protection(s) are actually running on this computer but still fail their CIS check for the reason above.</p>' -f $Cis.CompliantCount, $Cis.TotalCount, $Cis.RunningButNotCompliantCount))
+    $null = $sb.AppendLine('<table><thead><tr><th>CIS</th><th>Requirement</th><th>Policy value</th><th>CIS result</th><th>Actually running</th></tr></thead><tbody>')
+    foreach ($r in $Cis.Rows) {
+        $cls = if ($r.Compliant) { 'ok' } else { 'bad' }
+        $txt = if ($r.Compliant) { 'Pass' } else { 'Fail' }
+        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $runCls = if ($r.FeatureRunning) { 'ok' } else { 'na' }
+        $runTxt = if ($r.FeatureRunning) { 'Yes' } else { 'No' }
+        $null = $sb.AppendLine(('<tr><td>{0}<br><span class="tiny">{1}</span></td><td>{2}</td><td><code>{3}</code> = {4}</td><td><span class="badge {5}">{6}</span></td><td><span class="badge {7}">{8}</span></td></tr>' -f `
+            (ConvertTo-HtmlText $r.CisId), (ConvertTo-HtmlText $r.Profile), (ConvertTo-HtmlText $r.Title),
+            (ConvertTo-HtmlText $r.PolicyValueName), (ConvertTo-HtmlText $actual), $cls, $txt, $runCls, $runTxt))
+        if ($r.Divergence) {
+            $null = $sb.AppendLine(('<tr><td></td><td colspan="4" class="tiny"><strong>Deliberate difference:</strong> {0}</td></tr>' -f (ConvertTo-HtmlText $r.Divergence)))
+        }
+    }
+    $null = $sb.AppendLine('</tbody></table></div>')
+
+    # ---- secured core ----
+    $null = $sb.AppendLine('<h2>Secured-core PC criteria</h2><div class="card"><table><thead><tr><th>Requirement</th><th>Status</th></tr></thead><tbody>')
+    foreach ($c in $SecuredCore.Checks) {
+        $cls = if ($c.Met) { 'ok' } else { 'bad' }
+        $txt = if ($c.Met) { 'Met' } else { 'Not met' }
+        $null = $sb.AppendLine(('<tr><td>{0}</td><td><span class="badge {1}">{2}</span></td></tr>' -f (ConvertTo-HtmlText $c.Name), $cls, $txt))
+    }
+    $null = $sb.AppendLine('</tbody></table></div>')
+
+    $null = $sb.AppendLine(('<p class="tiny">Generated by {0} {1}. This report describes configuration state only and is not a vulnerability assessment. WinDSH writes local machine settings and never modifies Group Policy.</p>' -f `
+        (ConvertTo-HtmlText $script:ToolName), (ConvertTo-HtmlText $script:ToolVersion)))
+    $null = $sb.AppendLine('</div></body></html>')
+
+    return $sb.ToString()
+}
+
+# ===== 65-selftest.ps1 =====
+# ---------------------------------------------------------------------------
+# Synthetic self-test. Uses the in-memory registry provider, so apply/revert and the
+# whole evaluation chain are exercised without touching a real machine. Runs on any host.
+# ---------------------------------------------------------------------------
+
+function New-SyntheticState {
+    param([hashtable]$Override)
+
+    $state = [pscustomobject]@{
+        Generated = (Get-Date).ToUniversalTime().ToString('o')
+        Computer = [pscustomobject]@{
+            Name = 'SELFTEST'; Manufacturer = 'Contoso'; Model = 'TestBook 1'
+            ProcessorName = 'Contoso CPU 1.0'; ProcessorCount = 1
+            OsCaption = 'Windows 11 Enterprise'; ProductName = 'Windows 11 Enterprise'
+            EditionId = 'Enterprise'; BuildNumber = 26100; Ubr = 1
+            Is64Bit = $true; PartOfDomain = $false; DomainRole = 1; IsVirtual = $false
+        }
+        Firmware = [pscustomobject]@{
+            Type = 'UEFI'; Mode = 'UEFI'; IsUefiConfirmed = $true; IsLegacyConfirmed = $false
+            DetectionSource = 'SelfTest'; SecureBootSupported = $true; SecureBootEnabled = $true
+        }
+        Tpm = [pscustomobject]@{ Present = $true; Ready = $true; SpecVersion = '2.0'; IsTPM2 = $true }
+        Virtualization = [pscustomobject]@{ HypervisorPresent = $true; FirmwareEnabled = $true; FirmwareRaw = $true; Slat = $true }
+        HypervisorLaunch = [pscustomobject]@{ LaunchType = 'NotSet'; Source = 'SelfTest'; BlocksVbs = $false; Error = $null }
+        Dep = [pscustomobject]@{ SupportPolicy = 3; Available = $true; Text = 'On for all programs'; Enabled = $true }
+        VirtualMachine = [pscustomobject]@{ IsVirtual = $false; Platform = $null; Notes = @() }
+        DeviceGuard = [pscustomobject]@{
+            Available = $true; Configured = @(); Running = @()
+            AvailableProperties = @(1, 2, 3); RequiredProperties = @()
+            VbsStatusCode = 0; VbsStatusText = 'Not enabled'; CodeIntegrityPolicyEnforcement = 0
+            HasHypervisorSupport = $true; HasSecureBootProperty = $true; HasDmaProtection = $true
+            HasSmmMitigations = $false; HasMbec = $true
+        }
+        Policy = [pscustomobject]@{ Path = $script:RegPolicyDG; Values = @{}; AnyConfigured = $false }
+        Restart = [pscustomobject]@{ Pending = $false; Reasons = @(); ComponentBasedServicing = $false; WindowsUpdate = $false; QueuedFileRenameCount = 0 }
+    }
+
+    if ($Override) { foreach ($k in $Override.Keys) { $state.$k = $Override[$k] } }
+    return $state
+}
+
+function Invoke-SelfTest {
+    $pass = 0; $fail = 0
+    function Assert-That {
+        param([string]$Name, [bool]$Condition, [string]$Detail = '')
+        if ($Condition) { $script:stPass++; Write-Line ('{0}{1}' -f $Name, $(if ($Detail) { " - $Detail" } else { '' })) 'Good' }
+        else { $script:stFail++; Write-Line ('{0}{1}' -f $Name, $(if ($Detail) { " - $Detail" } else { '' })) 'Bad' }
+    }
+    $script:stPass = 0; $script:stFail = 0
+
+    # The self-test is unattended by definition: it must never block on a prompt.
+    $selfTestPriorUnattended = $script:Unattended
+    $script:Unattended = $true
+
+    Write-Section ('{0} {1} self-test' -f $script:ToolName, $script:ToolVersion)
+
+    # --- catalog integrity ---
+    $ids = Get-ControlIds
+    Assert-That 'Catalog ids are unique' ((@($ids | Select-Object -Unique)).Count -eq @($ids).Count) ('count={0}' -f @($ids).Count)
+
+    $dangling = @()
+    foreach ($c in $script:ControlCatalog) {
+        foreach ($d in (ConvertTo-Array $c.Requires)) { if ($ids -notcontains $d) { $dangling += "$($c.Id)->$d" } }
+    }
+    Assert-That 'All declared dependencies exist' ($dangling.Count -eq 0) ($dangling -join ', ')
+    Assert-That 'Every control has a documentation link' (@($script:ControlCatalog | Where-Object { $_.DocUrl -notmatch '^https://' }).Count -eq 0)
+    Assert-That 'Every control has a plain-language name and summary' (@($script:ControlCatalog | Where-Object { -not $_.PlainName -or -not $_.Summary }).Count -eq 0)
+    Assert-That 'Safe set contains only known controls' (@($script:SafeControlSet | Where-Object { $ids -notcontains $_ }).Count -eq 0)
+
+    $order = @(Resolve-ControlOrder -Id 'hvci' | Select-Object -ExpandProperty Id)
+    Assert-That 'Dependencies resolve before dependants' (($order[-1] -eq 'hvci') -and ($order -contains 'vbs')) ($order -join ' -> ')
+
+    # --- evaluation on a clean machine ---
+    Set-RegistryProvider (New-InMemoryRegistryProvider)
+    $clean = New-SyntheticState
+    $statuses = Get-AllControlStatus -State $clean
+    Assert-That 'All controls evaluate on a clean machine' (@($statuses).Count -eq @($ids).Count) ('count={0}' -f @($statuses).Count)
+    # Detection-only controls reflect what Windows already does, so DEP is legitimately
+    # running on a machine where WinDSH has configured nothing.
+    $configurable = @($statuses | Where-Object { -not (Get-PropertySafe (Get-Control -Id $_.Id) 'DetectionOnly' $false) })
+    Assert-That 'No configurable control reports running on a clean machine' (@($configurable | Where-Object { $_.State -eq 'Running' }).Count -eq 0)
+
+    $score = Get-SecurityScore -Statuses $statuses
+    Assert-That 'Clean machine scores zero' ($score.Score -eq 0) ('score={0}' -f $score.Score)
+    Assert-That 'Clean machine grade is Unprotected' ($score.Grade -eq 'Unprotected') $score.Grade
+
+    # --- hardware limits are excluded from the score, not counted as failures ---
+    $homeState = New-SyntheticState
+    $homeState.Computer.EditionId = 'Core'
+    $homeStatuses = Get-AllControlStatus -State $homeState
+    $cgHome = @($homeStatuses | Where-Object { $_.Id -eq 'credential-guard' })[0]
+    Assert-That 'Credential Guard is unsupported on Home' ($cgHome.State -eq 'NotSupported') $cgHome.SupportReason
+    $homeScore = Get-SecurityScore -Statuses $homeStatuses
+    Assert-That 'Unsupported controls are excluded from scoring' ($homeScore.ExcludedCount -ge 1) ('excluded={0}' -f $homeScore.ExcludedCount)
+
+    # --- hypervisor off blocks everything VBS-based ---
+    $offState = New-SyntheticState
+    $offState.HypervisorLaunch = [pscustomobject]@{ LaunchType = 'Off'; Source = 'SelfTest'; BlocksVbs = $true; Error = $null }
+    $offStatuses = Get-AllControlStatus -State $offState
+    $vbsOff = @($offStatuses | Where-Object { $_.Id -eq 'vbs' })[0]
+    Assert-That 'hypervisorlaunchtype=Off makes VBS unsupported' ($vbsOff.State -eq 'NotSupported') $vbsOff.SupportReason
+    $blOff = @($offStatuses | Where-Object { $_.Id -eq 'driver-blocklist' })[0]
+    Assert-That 'Driver blocklist is unaffected by the hypervisor' ($blOff.State -ne 'NotSupported') $blOff.State
+    $expOff = Get-ControlExplanation -Id 'vbs' -State $offState
+    Assert-That 'Explainer gives the bcdedit fix for a disabled hypervisor' ($expOff.Action -match 'hypervisorlaunchtype Auto') $expOff.Verdict
+
+    # --- legacy BIOS must not be read as UEFI ---
+    $legacy = New-SyntheticState
+    $legacy.Firmware = [pscustomobject]@{
+        Type = 'Legacy BIOS or unsupported UEFI'; Mode = 'Unknown'; IsUefiConfirmed = $false
+        IsLegacyConfirmed = $false; DetectionSource = 'SelfTest'; SecureBootSupported = $false; SecureBootEnabled = $false
+    }
+    $legacyStatus = Get-ControlStatus -Id 'secure-launch' -State $legacy
+    Assert-That 'Ambiguous firmware text is not treated as confirmed UEFI' ($legacyStatus.State -eq 'NotSupported') $legacyStatus.SupportReason
+
+    # --- plan and apply ---
+    Set-RegistryProvider (New-InMemoryRegistryProvider)
+    $plan = @(Get-ChangePlan -Ids @('hvci') -State $clean)
+    Assert-That 'Plan covers HVCI and its dependencies' (@($plan | Select-Object -ExpandProperty ControlId -Unique).Count -eq 3) (@($plan | Select-Object -ExpandProperty ControlId -Unique) -join ',')
+    Assert-That 'Every value needs changing on a clean machine' (@($plan | Where-Object { -not $_.NeedsChange }).Count -eq 0)
+
+    $journal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-selftest-{0}.jsonl' -f ([Guid]::NewGuid().ToString('N').Substring(0, 8)))
+    $env:WINDSH_JOURNAL_PATH = $journal
+    try {
+        $applied = Invoke-ControlApply -Ids @('hvci') -State $clean
+        Assert-That 'Apply writes the planned values' ($applied.ChangeCount -eq @($plan).Count) ('changes={0}' -f $applied.ChangeCount)
+        Assert-That 'VBS is on after apply' ((Get-RegValue -Path $script:RegDeviceGuard -Name 'EnableVirtualizationBasedSecurity') -eq 1)
+        Assert-That 'HVCI is on after apply' ((Get-RegValue -Path $script:RegHvci -Name 'Enabled') -eq 1)
+        Assert-That 'Locked stays 0 so changes can be undone' ((Get-RegValue -Path $script:RegHvci -Name 'Locked') -eq 0)
+
+        $second = Invoke-ControlApply -Ids @('hvci') -State $clean
+        Assert-That 'Applying twice is idempotent' ($second.ChangeCount -eq 0) ('changes={0}' -f $second.ChangeCount)
+
+        $revert = Invoke-ControlRevert -RunId $applied.RunId
+        Assert-That 'Revert restores every journalled value' ($revert.ChangeCount -eq $applied.ChangeCount) ('reverted={0}' -f $revert.ChangeCount)
+        Assert-That 'Values that never existed are removed, not zeroed' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+
+        # A stronger platform security level must survive.
+        Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegDeviceGuard + '|RequirePlatformSecurityFeatures') = 3 })
+        $planStrong = @(Get-ChangePlan -Ids @('platform-security') -State $clean | Where-Object { $_.Name -eq 'RequirePlatformSecurityFeatures' -and $_.NeedsChange })
+        Assert-That 'An existing stronger Secure Boot + DMA setting is preserved' (@($planStrong).Count -eq 0) 'value 3 must not be downgraded to 1'
+
+        # Group policy is never overwritten.
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $policyState = New-SyntheticState
+        $policyState.Policy = [pscustomobject]@{ Path = $script:RegPolicyDG; Values = @{ 'HypervisorEnforcedCodeIntegrity' = 0 }; AnyConfigured = $true }
+        $applyPolicy = Invoke-ControlApply -Ids @('hvci') -State $policyState
+        Assert-That 'Apply skips a policy-managed control' (@($applyPolicy.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
+        Assert-That 'No HVCI value is written under policy' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        Assert-That 'The unmanaged dependency still applies' ((Get-RegValue -Path $script:RegDeviceGuard -Name 'EnableVirtualizationBasedSecurity') -eq 1)
+    }
+    finally {
+        if (Test-Path -LiteralPath $journal) { Remove-Item -LiteralPath $journal -Force }
+        Remove-Item Env:\WINDSH_JOURNAL_PATH -ErrorAction SilentlyContinue
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+    }
+
+    # --- detection-only controls (restored from v1.6.0) ---
+    $detOnly = @($script:ControlCatalog | Where-Object { Get-PropertySafe $_ 'DetectionOnly' $false })
+    Assert-That 'Detection-only controls are present' (@($detOnly).Count -eq 3) (@($detOnly | Select-Object -ExpandProperty Id) -join ', ')
+    Assert-That 'Detection-only controls are never remediable' (@($detOnly | Where-Object { $_.Remediable }).Count -eq 0)
+    Assert-That 'Detection-only controls carry no scoring weight' (@($detOnly | Where-Object { $_.Weight -ne 0 }).Count -eq 0)
+
+    $depState = New-SyntheticState
+    $depStatus = Get-ControlStatus -Id 'dep' -State $depState
+    Assert-That 'DEP is reported running when the policy is on' ($depStatus.State -eq 'Running') $depStatus.State
+    $depOff = New-SyntheticState
+    $depOff.Dep = [pscustomobject]@{ SupportPolicy = 0; Available = $true; Text = 'Always off'; Enabled = $false }
+    Assert-That 'DEP off is not reported as configured' ((Get-ControlStatus -Id 'dep' -State $depOff).State -ne 'Running')
+
+    $hvptState = New-SyntheticState
+    $hvptState.DeviceGuard.Running = @(7)
+    Assert-That 'HVPT is detected from security service 7' ((Get-ControlStatus -Id 'hvpt' -State $hvptState).State -eq 'Running')
+    $smmState = New-SyntheticState
+    $smmState.DeviceGuard.Running = @(4)
+    Assert-That 'SMM firmware measurement is detected from service 4' ((Get-ControlStatus -Id 'smm-firmware-measurement' -State $smmState).State -eq 'Running')
+
+    $detExplain = Get-ControlExplanation -Id 'hvpt' -State $depOff
+    Assert-That 'Detection-only explainer does not offer to configure it' ($detExplain.Action -match 'does not configure') $detExplain.Action
+
+    # --- pre-flight safety check declaration (restored from v1.6.0) ---
+    $hvciControl = Get-Control -Id 'hvci'
+    Assert-That 'Memory Integrity declares a driver pre-flight check' ($null -ne $hvciControl.Preflight)
+    Assert-That 'Pre-flight watches Event ID 3087' (@($hvciControl.Preflight.EventIds) -contains 3087)
+    Assert-That 'Pre-flight blocks the safe set when tripped' ([bool]$hvciControl.Preflight.BlocksSafeSet)
+
+    # --- firmware guidance (restored from v1.6.0) ---
+    $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
+    Assert-That 'Dell firmware hints are matched' (($hintDell.Vendor -eq 'Dell') -and ($hintDell.EnterKey -match 'F2')) $hintDell.Vendor
+    $hintAcer = Get-FirmwareVendorHints -Manufacturer 'Acer' -Model 'Aspire A515'
+    Assert-That 'Acer hint warns about the Supervisor Password' ($hintAcer.SecureBoot -match 'Supervisor Password')
+    $hintSurface = Get-FirmwareVendorHints -Manufacturer 'Microsoft Corporation' -Model 'Surface Laptop 5'
+    Assert-That 'Surface uses the volume-button entry method' ($hintSurface.EnterKey -match 'Volume Up')
+    $hintUnknown = Get-FirmwareVendorHints -Manufacturer 'Acme Computers' -Model 'X1'
+    Assert-That 'Unknown manufacturer gets no invented menu path' (($null -eq $hintUnknown.TPM) -and ($null -eq $hintUnknown.EnterKey))
+
+    $fwState = New-SyntheticState
+    $fwState.Tpm = [pscustomobject]@{ Present = $false; Ready = $false; SpecVersion = ''; IsTPM2 = $false }
+    $fwState.Firmware.SecureBootEnabled = $false
+    $guidance = Get-FirmwareGuidance -State $fwState
+    Assert-That 'Firmware guidance lists only what is actually wrong' (@($guidance.Needed).Count -eq 2) (@($guidance.Needed | Select-Object -ExpandProperty What) -join '; ')
+    Assert-That 'Firmware guidance is pure data, with no restart inside it' ($guidance.PSObject.Properties['CanOfferReboot'] -ne $null)
+
+    $okState = New-SyntheticState
+    Assert-That 'A correct machine needs no firmware changes' (@((Get-FirmwareGuidance -State $okState).Needed).Count -eq 0)
+
+    # --- exit code meanings (restored from v1.6.0) ---
+    Assert-That 'Exit code 3010 explains the restart' ((Get-ExitCodeMeaning -Code 3010) -match 'restart')
+    Assert-That 'Exit code 4 explains the elevation failure' ((Get-ExitCodeMeaning -Code 4) -match 'Administrator')
+    Assert-That 'Unknown exit codes do not throw' ((Get-ExitCodeMeaning -Code 99) -match 'Unrecognised')
+
+    # --- confirmation must never prompt on an unattended run ---
+    $previousUnattended = $script:Unattended
+    $script:Unattended = $true
+    Assert-That 'Unattended runs never block on a confirmation prompt' (Confirm-Action 'This must not prompt')
+    $script:Unattended = $previousUnattended
+
+    # --- virtual machine assessment (restored from v1.6.0) ---
+    $vm = Get-VirtualMachineAssessment -Computer ([pscustomobject]@{ IsVirtual = $true; Manufacturer = 'VMware, Inc.'; Model = 'VMware Virtual Platform' }) `
+                                       -Virtualization ([pscustomobject]@{ FirmwareEnabled = $false })
+    Assert-That 'VMware is identified' ($vm.Platform -eq 'VMware') $vm.Platform
+    Assert-That 'VM guidance mentions nested virtualization' ((@($vm.Notes) -join ' ') -match 'Nested virtualization')
+    $physical = Get-VirtualMachineAssessment -Computer ([pscustomobject]@{ IsVirtual = $false; Manufacturer = 'Dell Inc.'; Model = 'Latitude' }) `
+                                             -Virtualization ([pscustomobject]@{ FirmwareEnabled = $true })
+    Assert-That 'A physical machine gets no VM notes' (@($physical.Notes).Count -eq 0)
+
+    # --- relaunch argument construction (privilege boundary) ---
+    $quoted = Get-RelaunchArgumentList -Bound @{ ReportDirectory = 'C:\Temp\My Reports'; AuditOnly = [switch]$true }
+    Assert-That 'Switch parameters relaunch without a value' (($quoted -contains '-AuditOnly') -and -not ($quoted -contains '"True"')) ($quoted -join ' ')
+    Assert-That 'Paths with spaces are quoted as one argument' ($quoted -contains '"C:\Temp\My Reports"') ($quoted -join ' ')
+
+    $hostile = Get-RelaunchArgumentList -Bound @{ ReportDirectory = 'C:\x" -Enable credential-guard "' }
+    Assert-That 'Embedded quotes cannot inject a new argument' (-not ($hostile -contains '-Enable')) ($hostile -join ' ')
+    Assert-That 'Embedded quotes are doubled, not passed through' (@($hostile | Where-Object { $_ -match '""' }).Count -eq 1) ($hostile -join ' ')
+
+    $empty = Get-RelaunchArgumentList -Bound @{ AutoReboot = [switch]$false }
+    Assert-That 'An unset switch is not relaunched' (@($empty).Count -eq 0) ('count={0}' -f @($empty).Count)
+
+    # --- CIS comparison ---
+    $cisState = New-SyntheticState
+    $cisStatuses = Get-AllControlStatus -State $cisState
+    $cis = Get-CisComplianceReport -State $cisState -Statuses $cisStatuses
+    Assert-That 'CIS report covers all seven 18.9.5 controls' ($cis.TotalCount -eq 7) ('count={0}' -f $cis.TotalCount)
+    Assert-That 'Nothing is CIS compliant with an empty policy hive' ($cis.CompliantCount -eq 0) ('compliant={0}' -f $cis.CompliantCount)
+
+    $cisState.Policy = [pscustomobject]@{
+        Path = $script:RegPolicyDG
+        Values = @{ 'EnableVirtualizationBasedSecurity' = 1; 'RequirePlatformSecurityFeatures' = 3 }
+        AnyConfigured = $true
+    }
+    $cis2 = Get-CisComplianceReport -State $cisState -Statuses $cisStatuses
+    Assert-That 'A configured policy value is reported compliant' (@($cis2.Rows | Where-Object { $_.CisId -eq '18.9.5.1' -and $_.Compliant }).Count -eq 1)
+    Assert-That 'Platform security level 3 also passes CIS' (@($cis2.Rows | Where-Object { $_.CisId -eq '18.9.5.2' -and $_.Compliant }).Count -eq 1)
+    Assert-That 'HVCI divergence from CIS is documented' (@($cis2.Rows | Where-Object { $_.CisId -eq '18.9.5.3' -and $_.Divergence }).Count -eq 1)
+
+    # --- HTML report ---
+    $score2 = Get-SecurityScore -Statuses $cisStatuses
+    $sc = Get-SecuredCoreVerdict -State $cisState -Statuses $cisStatuses
+    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $cisState })
+    $html = New-HtmlReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
+    Assert-That 'HTML report is produced' ($html.Length -gt 3000) ('{0} bytes' -f $html.Length)
+    Assert-That 'HTML report is self-contained' (($html -notmatch '<script') -and ($html -notmatch 'https?://[^"]*\.(css|js)')) 'no external css/js'
+    Assert-That 'HTML report escapes markup in values' (-not ($html -match '<script>alert'))
+    Assert-That 'HTML report states the CIS hive caveat' ($html -match 'Group Policy hive')
+
+    $injected = New-SyntheticState
+    $injected.Computer.Model = '<script>alert(1)</script>'
+    $injStatuses = Get-AllControlStatus -State $injected
+    $injHtml = New-HtmlReport -State $injected -Statuses $injStatuses -Score (Get-SecurityScore -Statuses $injStatuses) `
+        -SecuredCore (Get-SecuredCoreVerdict -State $injected -Statuses $injStatuses) `
+        -Cis (Get-CisComplianceReport -State $injected -Statuses $injStatuses) `
+        -Explanations @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $injected })
+    Assert-That 'Hostile field content cannot inject markup' (-not ($injHtml -match '<script>alert\(1\)</script>')) 'model string is escaped'
+
+    $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
+    Assert-That 'Plain-text report is produced' ($textReport.Length -gt 1500) ('{0} bytes' -f $textReport.Length)
+    Assert-That 'Text report states the CIS hive caveat' ($textReport -match 'Group Policy hive')
+    Assert-That 'Text report includes the score' ($textReport -match 'SECURITY SCORE')
+    Assert-That 'Text report includes DEP' ($textReport -match 'DEP')
+
+    Set-RegistryProvider (New-RegistryProvider)
+    $script:Unattended = $selfTestPriorUnattended
+
+    Write-Line ''
+    if ($script:stFail -eq 0) { Write-Line ('Self-test: {0} passed, 0 failed.' -f $script:stPass) 'Good'; return 0 }
+    Write-Line ('Self-test: {0} passed, {1} FAILED.' -f $script:stPass, $script:stFail) 'Bad'
+    return 1
+}
+
+# ===== 70-main.ps1 =====
+# ---------------------------------------------------------------------------
+# Console rendering. Two tiers: a plain-language summary by default, full technical
+# detail behind -Advanced. v1 showed one uniform level of detail to everyone.
+# ---------------------------------------------------------------------------
+
+function Show-Summary {
+    param($State, $Statuses, $Score, $SecuredCore)
+
+    Write-Section 'Security score'
+    $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
+    Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
+    $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
+    $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
+    Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
+    if ($Score.ExcludedCount -gt 0) {
+        Write-Line ('{0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
+    }
+
+    if ($State.HypervisorLaunch.BlocksVbs) {
+        Write-Line ''
+        Write-Line 'The Windows hypervisor is switched off in the boot configuration.' 'Bad'
+        Write-Line 'No virtualization-based protection can start until that is changed.' 'Bad' 2
+    }
+
+    Write-Section 'Protections'
+    foreach ($s in $Statuses) {
+        $kind = switch ($s.State) {
+            'Running' { 'Good' }
+            'ConfiguredNotRunning' { 'Warn' }
+            'NotConfigured' { 'Bad' }
+            default { 'Info' }
+        }
+        $label = (Get-StateLabel $s.State).Text
+        $policy = if ($s.ManagedByPolicy) { ' (Group Policy)' } else { '' }
+        Write-Line ('{0,-34} {1}{2}' -f $s.PlainName, $label, $policy) $kind
+        if ($Advanced) {
+            Write-Line ('{0}  [{1}]' -f $s.Name, $s.Id) 'Dim' 9
+            if ($s.SupportReason) { Write-Line $s.SupportReason 'Dim' 9 }
+        }
+    }
+
+    if ($Advanced) {
+        Write-Section 'System'
+        Write-Line ('Machine     : {0} {1}' -f $State.Computer.Manufacturer, $State.Computer.Model) 'Dim'
+        Write-Line ('Processor   : {0}' -f $State.Computer.ProcessorName) 'Dim'
+        Write-Line ('Windows     : {0} build {1} ({2})' -f $State.Computer.OsCaption, $State.Computer.BuildNumber, $State.Computer.EditionId) 'Dim'
+        Write-Line ('Firmware    : {0} (mode {1}, via {2})' -f $State.Firmware.Type, $State.Firmware.Mode, $State.Firmware.DetectionSource) 'Dim'
+        Write-Line ('Secure Boot : {0}' -f (Format-Bool $State.Firmware.SecureBootEnabled 'Enabled' 'Disabled' 'Unavailable')) 'Dim'
+        Write-Line ('TPM         : {0} (spec {1})' -f (Format-Bool $State.Tpm.IsTPM2 'TPM 2.0' 'not confirmed'), $State.Tpm.SpecVersion) 'Dim'
+        Write-Line ('Hypervisor  : launch type {0} via {1}' -f $State.HypervisorLaunch.LaunchType, $State.HypervisorLaunch.Source) 'Dim'
+        Write-Line ('Secured-core: {0}' -f (Format-Bool $SecuredCore.Qualifies 'qualifies' ('does not qualify ({0} unmet)' -f $SecuredCore.UnmetCount))) 'Dim'
+    }
+}
+
+function Show-NextSteps {
+    param($Explanations)
+    $todo = @($Explanations | Where-Object { $_.Severity -ne 'Good' })
+    Write-Section 'What to do next'
+    if (@($todo).Count -eq 0) { Write-Line 'Nothing. Every protection this computer supports is active.' 'Good'; return }
+
+    $n = 0
+    foreach ($e in $todo) {
+        $n++
+        Write-Line ''
+        Write-Line ('{0}. {1}' -f $n, $e.PlainName) 'Head'
+        Write-Line $e.Verdict $(if ($e.Severity -eq 'Warn') { 'Warn' } else { 'Info' }) 3
+        if ($e.Action) {
+            foreach ($line in ($e.Action -split "`n")) { Write-Line $line 'Plain' 6 }
         }
     }
 }
 
-function Show-Menu {
-    param([Parameter(Mandatory=$true)]$State)
-    Write-Host ''
-    Write-Host 'Actions' -ForegroundColor White
-    Write-Host '  [1] Refresh / audit status'
-    Write-MenuAction '2' 'Enable VBS + Memory Integrity (recommended)' (Get-MenuActionAvailability -State $State -Key '2')
-    Write-MenuAction '3' 'Enable System Guard Secure Launch / Firmware protection' (Get-MenuActionAvailability -State $State -Key '3')
-    Write-MenuAction '4' 'Enable Credential Guard WITHOUT UEFI lock (advanced; Enterprise/Education)' (Get-MenuActionAvailability -State $State -Key '4')
-    Write-MenuAction '5' 'Enable Vulnerable Driver Blocklist explicit preference (advanced)' (Get-MenuActionAvailability -State $State -Key '5')
-    Write-Host '  [6] Open Windows Security Core isolation page'
-    Write-Host '  [7] Run Memory Integrity / HVCI driver-event diagnostics'
-    Write-Host '  [8] Open Code Integrity Event Viewer log'
-    Write-MenuAction 'P' 'Preview / WhatIf recommended Safe changes' (Get-MenuActionAvailability -State $State -Key 'P')
-    Write-MenuAction 'A' 'Enable All Safe (all applicable safe protections)' (Get-MenuActionAvailability -State $State -Key 'A')
-    Write-Host '  [R] Save report (asks Text or JSON; default Text)'
-    Write-Host '  [Q] Quit'
-    Write-Host ''
-    Write-Host 'Grayed UNAVAILABLE actions cannot be applied locally; the reason is shown on the same line.' -ForegroundColor DarkGray
-    Write-Host 'Press one listed key; Enter is not required.' -ForegroundColor DarkGray
+function Show-CisSummary {
+    param($Cis)
+    Write-Section 'CIS Benchmark comparison'
+    Write-Line ('{0}, section {1}' -f $Cis.Benchmark, $Cis.Section) 'Dim'
+    Write-Line ('{0} of {1} checks pass.' -f $Cis.CompliantCount, $Cis.TotalCount) $(if ($Cis.CompliantCount -eq $Cis.TotalCount) { 'Good' } else { 'Warn' })
+    if ($Cis.RunningButNotCompliantCount -gt 0) {
+        Write-Line ('{0} protection(s) are running but still fail their CIS check.' -f $Cis.RunningButNotCompliantCount) 'Info'
+    }
+    Write-Line $Cis.Note 'Dim'
+    foreach ($r in $Cis.Rows) {
+        $kind = if ($r.Compliant) { 'Good' } else { 'Bad' }
+        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        Write-Line ('{0,-9} {1,-38} policy value = {2}' -f $r.CisId, $r.PolicyValueName, $actual) $kind 2
+    }
 }
 
-function Get-UnattendedExitCode {
-    param([switch]$RemediationRequested, [switch]$ExplicitPrerequisiteAction)
-    if ($script:Outcome.IntegrityFailed) { return 3 }
-    if ($RemediationRequested -and $script:Outcome.RemediationFailed) { return 5 }
-    if ($RemediationRequested -and $script:Outcome.PolicyBlocked) { return 2 }
-    if ($ExplicitPrerequisiteAction -and $script:Outcome.PrerequisiteUnavailable) { return 4 }
-    if ($script:RestartRecommended) { return 3010 }
-    return 0
+function Show-Plan {
+    param($Plan)
+    Write-Section 'Planned changes'
+    $changes = @($Plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason })
+    $skips = @($Plan | Where-Object { $_.SkipReason } | Group-Object ControlId)
+
+    if (@($changes).Count -eq 0) { Write-Line 'No changes are needed.' 'Good' }
+    foreach ($c in $changes) {
+        $before = if ($c.CurrentExists) { [string]$c.CurrentValue } else { '(not set)' }
+        Write-Line ('{0}\{1}: {2} -> {3}' -f $c.Path, $c.Name, $before, $c.DesiredValue) 'Info' 2
+        if ($c.Note) { Write-Line $c.Note 'Dim' 6 }
+    }
+    foreach ($g in $skips) {
+        Write-Line ('Skipping {0}: {1}' -f $g.Name, @($g.Group)[0].SkipReason) 'Warn' 2
+    }
 }
 
-function New-RmmResult {
-    param(
-        [Parameter(Mandatory=$true)]$State,
-        [Parameter(Mandatory=$true)][int]$ExitCode
-    )
-    return [pscustomobject]@{
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+function Get-ReportFolder {
+    if (-not [string]::IsNullOrWhiteSpace($ReportDirectory)) { return $ReportDirectory }
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if ([string]::IsNullOrWhiteSpace($desktop)) { $desktop = [IO.Path]::GetTempPath() }
+    return (Join-Path $desktop 'WinDSH-Reports')
+}
+
+function Save-Reports {
+    param($State, $Statuses, $Score, $SecuredCore, $Cis, $Explanations, [hashtable]$Formats)
+    if ($NoReport) { return @() }
+
+    # Interactive callers pass an explicit format selection; command-line runs fall back
+    # to the switches, defaulting to HTML.
+    $wantHtml = if ($Formats) { [bool]$Formats.Html } else { [bool]($HtmlReport -or -not ($JsonReport -or $TextReport)) }
+    $wantText = if ($Formats) { [bool]$Formats.Text } else { [bool]$TextReport }
+    $wantJson = if ($Formats) { [bool]$Formats.Json } else { [bool]$JsonReport }
+
+    $folder = Get-ReportFolder
+    if (-not (Test-Path -LiteralPath $folder)) {
+        New-Item -ItemType Directory -Path $folder -Force -WhatIf:$false | Out-Null
+    }
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+    $base = Join-Path $folder ('WinDSH-{0}-{1}' -f $State.Computer.Name, $stamp)
+    $written = @()
+    $encoding = New-Object Text.UTF8Encoding($false)
+
+    if ($wantText) {
+        $text = New-TextReport -State $State -Statuses $Statuses -Score $Score -SecuredCore $SecuredCore -Cis $Cis -Explanations $Explanations
+        $path = $base + '.txt'
+        [IO.File]::WriteAllText($path, $text, $encoding)
+        $written += $path
+    }
+    if ($wantHtml) {
+        $html = New-HtmlReport -State $State -Statuses $Statuses -Score $Score -SecuredCore $SecuredCore -Cis $Cis -Explanations $Explanations
+        $path = $base + '.html'
+        [IO.File]::WriteAllText($path, $html, $encoding)
+        $written += $path
+    }
+    if ($wantJson) {
+        $payload = [pscustomobject]@{
+            SchemaVersion = $script:SchemaVersion
+            Tool = [pscustomobject]@{ Name = $script:ToolName; Version = $script:ToolVersion; Integrity = (Get-SelfIntegrity).Status }
+            Generated = $State.Generated
+            Computer = $State.Computer
+            Firmware = $State.Firmware
+            Tpm = $State.Tpm
+            HypervisorLaunch = $State.HypervisorLaunch
+            Restart = $State.Restart
+            Score = $Score
+            SecuredCore = $SecuredCore
+            Controls = $Statuses
+            Cis = $Cis
+            AppliedChanges = $script:AppliedChanges
+            Warnings = $script:Warnings
+        }
+        $path = $base + '.json'
+        [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 12), $encoding)
+        $written += $path
+    }
+    return $written
+}
+
+function Write-RmmOutput {
+    param($State, $Statuses, $Score, $Cis)
+    $payload = [pscustomobject]@{
         schemaVersion = $script:SchemaVersion
         tool = $script:ToolName
         version = $script:ToolVersion
-        generated = (Get-Date).ToString('s')
-        computer = [pscustomobject]@{
-            name = $State.Computer.Name
-            windows = $State.Computer.ProductName
-            version = $State.Computer.DisplayVersion
-            build = $State.Computer.Build
-            edition = $State.Computer.EditionID
-            virtualMachine = $State.VirtualMachine.Detected
-            virtualPlatform = $State.VirtualMachine.PlatformHint
-        }
-        exitCode = $ExitCode
-        status = Get-ExitCodeMeaning -Code $ExitCode
-        integrity = $script:IntegrityState
-        rebootRequired = $script:RestartRecommended
-        security = [pscustomobject]@{
-            secureBootEnabled = $State.Firmware.SecureBootEnabled
-            tpmPresent = $State.TPM.Present
-            tpmReady = $State.TPM.Ready
-            virtualizationFirmwareEnabled = $State.Virtualization.VirtualizationFirmwareEnabled
-            vbsStatus = $State.VBS.Status
-            memoryIntegrityRunning = $State.Features.MemoryIntegrity.Running
-            secureLaunchRunning = $State.Features.SecureLaunch.Running
-            credentialGuardRunning = $State.Features.CredentialGuard.Running
-            kernelDmaCapability = $State.HardwareCapabilities.DMACapability
-        }
-        summary = @(Get-ReportSummaryRows -State $State)
-        unsupportedCapabilities = @(Get-UnsupportedCapabilities -State $State)
-        outcome = [pscustomobject]$script:Outcome
-        changes = @($script:Changes)
-        plannedChanges = @($script:PlannedChanges)
-        hvciDiagnostics = if ($script:LastHvciDiagnostics) { [pscustomobject]@{
-            assessment=$script:LastHvciDiagnostics.Assessment
-            compatibilityEventCount=$script:LastHvciDiagnostics.CompatibilityEventCount
-            candidateDriverReferences=@($script:LastHvciDiagnostics.CandidateDriverReferences)
-        }} else { $null }
-        reportPath = $script:LastReportPath
+        computer = $State.Computer.Name
+        generated = $State.Generated
+        score = $Score.Score
+        grade = $Score.Grade
+        restartRequired = $script:RestartRequired
+        hypervisorBlocksVbs = $State.HypervisorLaunch.BlocksVbs
+        firmwareMode = $State.Firmware.Mode
+        secureBoot = $State.Firmware.SecureBootEnabled
+        tpm2 = $State.Tpm.IsTPM2
+        cisCompliant = $Cis.CompliantCount
+        cisTotal = $Cis.TotalCount
+        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy } })
+        changes = @($script:AppliedChanges).Count
+        warnings = @($script:Warnings).Count
+        exitCode = $script:ExitCode
     }
+    Write-Output ($payload | ConvertTo-Json -Depth 8 -Compress)
 }
 
-function Invoke-WinDSHSelfTest {
-    $tests = @()
-    function Add-TestResult { param([string]$Name,[bool]$Passed,[string]$Detail); $script:SelfTestTemp += [pscustomobject]@{Name=$Name;Passed=$Passed;Detail=$Detail} }
-    $script:SelfTestTemp = @()
+# ---------------------------------------------------------------------------
+# Interactive
+# ---------------------------------------------------------------------------
 
-    try {
-        $state = [pscustomobject]@{
-            Computer=[pscustomobject]@{BuildNumber=26200;EditionID='Enterprise';IsDomainController=$false}
-            Firmware=[pscustomobject]@{Type='UEFI';SecureBootSupported=$true;SecureBootEnabled=$true}
-            TPM=[pscustomobject]@{Present=$true;Ready=$true;IsTPM2=$true;SpecVersion='2.0'}
-            Virtualization=[pscustomobject]@{VirtualizationFirmwareEnabled=$true;HypervisorPresent=$true;VMMonitorModeExtensions=$true;SLAT=$true;SLATAssessment='Supported'}
-            HardwareCapabilities=[pscustomobject]@{DMACapability=$true;NXAvailable=$true}
-            DEP=[pscustomobject]@{Available=$true}
-            VBS=[pscustomobject]@{StatusCode=2;Status='Running'}
-            Features=[pscustomobject]@{
-                MemoryIntegrity=[pscustomobject]@{Running=$false;Configured=$false;ManagedByPolicy=$false;RegistryEnabled=$null}
-                SecureLaunch=[pscustomobject]@{Running=$false;Configured=$false;ManagedByPolicy=$false;BasicPrerequisitesConfirmed=$true;RegistryEnabled=$null}
-                CredentialGuard=[pscustomobject]@{Running=$false;Configured=$false;ManagedByPolicy=$false;EditionSupported=$true;LsaCfgFlags=$null}
-                KernelStackProtection=[pscustomobject]@{Running=$false;Configured=$false;AuditMode=$false;WindowsVersionEligible=$true}
-                VulnerableDriverBlocklist=[pscustomobject]@{RegistryValue=$null;EffectiveAssessment='Windows default is enabled; no explicit local override found'}
-                SMMFirmwareMeasurement=[pscustomobject]@{Running=$false;Configured=$false}
-                HypervisorEnforcedPagingTranslation=[pscustomobject]@{Running=$false;Configured=$false}
-            }
-            Policy=[pscustomobject]@{EnableVirtualizationBasedSecurity=$null;HypervisorEnforcedCodeIntegrity=$null;ConfigureSystemGuardLaunch=$null;CredentialGuardLsaCfgFlags=$null}
-            Restart=[pscustomobject]@{Pending=$false}
-        }
-        $a2 = Get-MenuActionAvailability -State $state -Key '2'
-        Add-TestResult 'Memory Integrity action available on baseline state' $a2.Actionable $a2.Reason
-        $a3 = Get-MenuActionAvailability -State $state -Key '3'
-        Add-TestResult 'Secure Launch action available with UEFI + TPM2' $a3.Actionable $a3.Reason
-        $fw = @(Get-FirmwareActions -State $state)
-        Add-TestResult 'Firmware action list can be empty without throwing' ($fw.Count -eq 0) ('Count={0}' -f $fw.Count)
-        $summaryRows = @(Get-QuickSummary -State $state)
-        Add-TestResult 'Easy Summary returns a stable multi-item array' ($summaryRows.Count -eq 10) ('Count={0}' -f $summaryRows.Count)
-        $state.Firmware.SecureBootEnabled = $false
-        $fwNeedsAction = @(Get-FirmwareActions -State $state)
-        Add-TestResult 'Firmware action list handles a single action safely' ($fwNeedsAction.Count -eq 1) ('Count={0}' -f $fwNeedsAction.Count)
-        $state.Firmware.SecureBootEnabled = $true
-        $state.Features.CredentialGuard.EditionSupported = $false
-        $a4 = Get-MenuActionAvailability -State $state -Key '4'
-        Add-TestResult 'Credential Guard is unavailable when edition support is false' (-not $a4.Actionable) $a4.Reason
-        Add-TestResult 'Empty array membership is safe' (-not (Test-ArrayContains @() 2)) 'Test-ArrayContains returned expected False.'
-    }
-    catch {
-        Add-TestResult 'Self-test harness' $false $_.Exception.Message
-    }
-
-    $tests = @($script:SelfTestTemp)
-    Remove-Variable -Name SelfTestTemp -Scope Script -ErrorAction SilentlyContinue
-    Write-Host ('WinDSH v{0} synthetic self-test' -f $script:ToolVersion) -ForegroundColor Cyan
-    foreach ($t in $tests) { Write-Host ('[{0}] {1} - {2}' -f $(if($t.Passed){'PASS'}else{'FAIL'}),$t.Name,$t.Detail) -ForegroundColor $(if($t.Passed){'Green'}else{'Red'}) }
-    $failed = @($tests | Where-Object {-not $_.Passed}).Count
-    if ($failed -gt 0) { Write-Host ('Self-test result: {0} failed.' -f $failed) -ForegroundColor Red; return 1 }
-    Write-Host 'Self-test result: PASS.' -ForegroundColor Green
-    return 0
+function Wait-ForKey {
+    param([string]$Message = 'Press any key to return to the menu...')
+    Write-Line ''
+    Write-Line $Message 'Info'
+    try { [void][Console]::ReadKey($true) }
+    catch { [void](Read-Host) }
 }
 
-function Invoke-Unattended {
-    $state = Invoke-DebugStage -Name 'Initial system-state audit' -ScriptBlock { Get-SystemState }
-    $script:InitialState = $state
-    $script:FinalState = $state
-    Write-SystemStateDebugSnapshot -State $state
-    if (-not $script:RmmMode) { Invoke-DebugStage -Name 'Render audit output' -ScriptBlock { Show-State -State $state } }
-
-    $preview = $script:PreviewRequested
-    if ($preview) {
-        if ($EnableAllSafe) {
-            $plan = Get-ChangePlan -State $state -Target Safe
-            $script:PlannedChanges += $plan
-            if (-not $script:RmmMode) { Show-ChangePlan -Plan $plan }
-        }
-        if ($EnableCredentialGuard) {
-            $planCg = Get-ChangePlan -State $state -Target CredentialGuard
-            $script:PlannedChanges += $planCg
-            if (-not $script:RmmMode) { Show-ChangePlan -Plan $planCg }
-        }
-    }
-    else {
-        if ($EnableAllSafe) {
-            Enable-AllRecommended -State $state -ForceConfirmed
-            $state = Get-SystemState
-        }
-        if ($EnableCredentialGuard) {
-            Enable-CredentialGuardFeature -State $state -ForceConfirmed
-            $state = Get-SystemState
-        }
-    }
-
-    if (@($script:Changes).Count -gt 0 -and -not $script:RmmMode) {
-        Write-Section 'Status after requested changes (before restart)'
-        $state = Get-SystemState
-        Show-State -State $state
-    }
-
-    $script:FinalState = $state
-    $remediationRequested = [bool](($EnableAllSafe -or $EnableCredentialGuard) -and -not $preview)
-    $explicitPrerequisite = [bool]($EnableCredentialGuard -and -not $EnableAllSafe -and -not $preview)
-    $script:LastExitCode = Get-UnattendedExitCode -RemediationRequested:$remediationRequested -ExplicitPrerequisiteAction:$explicitPrerequisite
-
-    if ($script:EffectiveReportFormat -and $script:EffectiveReportFormat -ne 'None') {
-        [void](Save-Report -State $state -Format $script:EffectiveReportFormat)
-    }
-
-    if (-not $script:RmmMode) { Show-RestartSummary -State $state }
-
-    if ($AutoReboot -and $script:RestartRecommended -and -not $script:Outcome.IntegrityFailed -and -not $script:Outcome.RemediationFailed) {
-        if (-not $script:RmmMode) { Write-Host 'AutoReboot was requested. Restarting Windows now.' -ForegroundColor Yellow }
-        Restart-Computer -Force
-        return 0
-    }
-
-    if (-not $script:RmmMode) {
-        Write-Host ('Unattended exit code: {0} - {1}' -f $script:LastExitCode,(Get-ExitCodeMeaning -Code $script:LastExitCode)) -ForegroundColor DarkGray
-    }
-    return $script:LastExitCode
-}
-
-function Show-InformationGatheringBanner {
+function Show-Menu {
+    param($Statuses, $Score)
     Write-Host ''
-    Write-Host ('-' * 82) -ForegroundColor DarkCyan
-    Write-Host ' Gathering Windows device-security information... Please wait.' -ForegroundColor Cyan
-    Write-Host ('-' * 82) -ForegroundColor DarkCyan
+    Write-Line ('{0} {1}   security score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
+    Write-Host ''
+    Write-Line '  [1] Re-check this computer' 'Plain'
+    Write-Line '  [2] Fix what can be fixed safely' 'Plain'
+    Write-Line '  [3] Explain a protection' 'Plain'
+    Write-Line '  [4] Save a report' 'Plain'
+    Write-Line '  [5] More options' 'Plain'
+    Write-Line '  [Q] Quit' 'Plain'
+    Write-Host ''
 }
 
-function Show-InformationGatheringComplete {
-    Write-Host ' Information gathering completed.' -ForegroundColor Green
+function Show-MoreMenu {
     Write-Host ''
+    Write-Line 'More options' 'Head'
+    Write-Host ''
+    Write-Line '  [A] Preview what "fix safely" would change' 'Plain'
+    Write-Line '  [B] Turn on a specific protection' 'Plain'
+    Write-Line '  [C] Undo a previous change' 'Plain'
+    Write-Line '  [D] CIS Benchmark comparison' 'Plain'
+    Write-Line '  [E] Open Windows Core isolation settings' 'Plain'
+    Write-Line '  [F] How to change BIOS/UEFI settings on this PC' 'Plain'
+    Write-Line '  [G] Why is Memory Integrity blocked? (driver diagnostics)' 'Plain'
+    Write-Line '  [H] Open the Code Integrity event log' 'Plain'
+    Write-Line '  [X] Back' 'Plain'
+    Write-Host ''
+}
+
+function Read-Choice {
+    param([string]$Valid)
+    while ($true) {
+        $raw = Read-Host 'Select'
+        if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+        $c = $raw.Trim().ToUpperInvariant()
+        if ($c.Length -eq 1 -and $Valid.Contains($c)) { return $c }
+        Write-Line 'Not a valid choice.' 'Warn'
+    }
+}
+
+function Select-ControlInteractive {
+    Write-Line ''
+    $ids = Get-ControlIds
+    $n = 0
+    foreach ($id in $ids) { $n++; Write-Line ('  {0}. {1}' -f $n, (Get-Control -Id $id).PlainName) 'Plain' }
+    $raw = Read-Host 'Number (blank to cancel)'
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    $index = 0
+    if (-not [int]::TryParse($raw.Trim(), [ref]$index)) { return $null }
+    if ($index -lt 1 -or $index -gt @($ids).Count) { return $null }
+    return @($ids)[$index - 1]
+}
+
+function Show-Explanation {
+    param($Explanation)
+    Write-Section $Explanation.PlainName
+    Write-Line $Explanation.Name 'Dim'
+    Write-Line ''
+    Write-Line $Explanation.Summary 'Plain'
+    Write-Line ('Why it matters: {0}' -f $Explanation.Why) 'Dim'
+    if ($Explanation.Caution) { Write-Line ('Caution: {0}' -f $Explanation.Caution) 'Warn' }
+    Write-Line ''
+    Write-Line $Explanation.Verdict $(switch ($Explanation.Severity) { 'Good' { 'Good' } 'Warn' { 'Warn' } default { 'Info' } })
+    if ($Explanation.Action) {
+        Write-Line ''
+        Write-Line 'What to do:' 'Head'
+        foreach ($line in ($Explanation.Action -split "`n")) { Write-Line $line 'Plain' 2 }
+    }
+    if ($Explanation.Cis) {
+        Write-Line ''
+        Write-Line ('CIS {0} ({1}): {2}' -f $Explanation.Cis.Id, $Explanation.Cis.Profile, $Explanation.Cis.Title) 'Dim'
+    }
+    Write-Line ('Reference: {0}' -f $Explanation.DocUrl) 'Dim'
 }
 
 function Invoke-Interactive {
-    Write-Host ('{0} v{1}' -f $script:ToolName,$script:ToolVersion) -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host ("`t`t{0}" -f $script:ContactEmail) -ForegroundColor Yellow
-    Write-Host ''
-    Write-Host 'Windows Device Security audit and safe remediation' -ForegroundColor Gray
-    Write-Host 'No downloads, AV changes, execution-policy bypass, TPM clear, Secure Boot modification, or encryption changes.' -ForegroundColor DarkGray
+    param($State)
 
-    Show-InformationGatheringBanner
-    $state = Invoke-DebugStage -Name 'Initial system-state audit' -ScriptBlock { Get-SystemState }
-    $script:InitialState = $state
-    $script:FinalState = $state
-    Write-SystemStateDebugSnapshot -State $state
-    Show-InformationGatheringComplete
-    Invoke-DebugStage -Name 'Render audit output' -ScriptBlock { Show-State -State $state }
+    $statuses = Get-AllControlStatus -State $State
+    $score = Get-SecurityScore -Statuses $statuses
+    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
+    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
+    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
+
+    Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
+    Show-NextSteps -Explanations $explanations
 
     while ($true) {
-        Show-Menu -State $state
-        $choice = Read-MenuChoice
+        Show-Menu -Statuses $statuses -Score $score
+        $choice = Read-Choice '12345Q'
+
+        if ($choice -eq 'Q') {
+            # No second full audit when nothing changed: the state we have is still true.
+            if (@($script:AppliedChanges).Count -eq 0) {
+                Write-Line ''
+                Write-Line 'No changes were made to this computer.' 'Dim'
+                if ($State.Restart.Pending) { Write-Line 'Note: Windows has its own restart pending, unrelated to this tool.' 'Dim' }
+                return
+            }
+            $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+            foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
+            if ($script:RestartRequired) {
+                Write-Line ''
+                Write-Line 'A restart is needed before the changes take effect.' 'Warn'
+            }
+            return
+        }
+
         switch ($choice) {
-            '1' { $state = Get-SystemState; $script:FinalState=$state; Show-State -State $state }
+            '1' {
+                $State = Get-SystemState -Volatile
+                $statuses = Get-AllControlStatus -State $State
+                $score = Get-SecurityScore -Statuses $statuses
+                $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
+                $cis = Get-CisComplianceReport -State $State -Statuses $statuses
+                $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
+                Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
+                Show-NextSteps -Explanations $explanations
+            }
             '2' {
-                if (Test-MenuActionSelectable -State $state -Key '2') { Enable-MemoryIntegrity -State $state; $state=Get-SystemState; $script:FinalState=$state; Show-State -State $state }
+                $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $State
+                Write-Section 'Result'
+                if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
+                foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
+                foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
+                if ($result.RestartRequired) {
+                    Write-Line ''
+                    Write-Line ('Restart required. Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info'
+                }
+                $State = Get-SystemState -Volatile
+                $statuses = Get-AllControlStatus -State $State
+                $score = Get-SecurityScore -Statuses $statuses
             }
             '3' {
-                if (Test-MenuActionSelectable -State $state -Key '3') { Enable-SecureLaunch -State $state; $state=Get-SystemState; $script:FinalState=$state; Show-State -State $state }
+                $id = Select-ControlInteractive
+                if ($id) { Show-Explanation (Get-ControlExplanation -Id $id -State $State) }
             }
             '4' {
-                if (Test-MenuActionSelectable -State $state -Key '4') { Enable-CredentialGuardFeature -State $state; $state=Get-SystemState; $script:FinalState=$state; Show-State -State $state }
+                Write-Line ''
+                Write-Line 'Report format:' 'Head'
+                Write-Line '  [1] Web page (HTML) - easiest to read and share' 'Plain'
+                Write-Line '  [2] Plain text' 'Plain'
+                Write-Line '  [3] JSON - for other tools' 'Plain'
+                Write-Line '  [4] All three' 'Plain'
+                $fmt = Read-Choice '1234'
+                $script:HtmlSelected = [bool]($fmt -eq '1' -or $fmt -eq '4')
+                $script:TextSelected = [bool]($fmt -eq '2' -or $fmt -eq '4')
+                $script:JsonSelected = [bool]($fmt -eq '3' -or $fmt -eq '4')
+                $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
+                foreach ($p in $paths) { Write-Line ('Saved: {0}' -f $p) 'Good' }
             }
             '5' {
-                if (Test-MenuActionSelectable -State $state -Key '5') { Enable-VulnerableDriverBlocklist -State $state; $state=Get-SystemState; $script:FinalState=$state; Show-State -State $state }
+                Show-MoreMenu
+                $sub = Read-Choice 'ABCDEFGHX'
+                switch ($sub) {
+                    'A' { Show-Plan (Get-ChangePlan -Ids $script:SafeControlSet -State $State) }
+                    'B' {
+                        $id = Select-ControlInteractive
+                        if ($id) {
+                            $result = Invoke-ControlApply -Ids @($id) -State $State
+                            Write-Section 'Result'
+                            if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
+                            foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
+                            foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
+                            $State = Get-SystemState -Volatile
+                            $statuses = Get-AllControlStatus -State $State
+                            $score = Get-SecurityScore -Statuses $statuses
+                        }
+                    }
+                    'C' {
+                        $runs = Get-JournalRuns
+                        if (@($runs).Count -eq 0) { Write-Line 'No recorded changes to undo.' 'Info' }
+                        else {
+                            Write-Section 'Recorded change runs'
+                            foreach ($r in $runs) { Write-Line ('{0}  {1}  {2} change(s)  [{3}]' -f $r.RunId, $r.Time, $r.ChangeCount, $r.Controls) 'Plain' 2 }
+                            $rid = Read-Host 'Run id to undo (blank to cancel)'
+                            if (-not [string]::IsNullOrWhiteSpace($rid)) {
+                                $rev = Invoke-ControlRevert -RunId $rid.Trim()
+                                Write-Line ('Reverted {0} change(s).' -f $rev.ChangeCount) 'Good'
+                                $State = Get-SystemState -Volatile
+                                $statuses = Get-AllControlStatus -State $State
+                                $score = Get-SecurityScore -Statuses $statuses
+                            }
+                        }
+                    }
+                    'D' { Show-CisSummary -Cis $cis }
+                    'E' {
+                        try { Start-Process 'windowsdefender://coreisolation' | Out-Null; Write-Line 'Opened Windows Security.' 'Good' }
+                        catch { Write-Line 'Could not open Windows Security.' 'Warn' }
+                    }
+                    'F' {
+                        $guidance = Get-FirmwareGuidance -State $State
+                        Show-FirmwareGuidance -Guidance $guidance -State $State
+                        # The restart is the caller's decision, never a side effect of rendering.
+                        if ($guidance.CanOfferReboot) { [void](Invoke-RebootToFirmware -Guidance $guidance) }
+                    }
+                    'G' { Show-CodeIntegrityDiagnostics -State $State }
+                    'H' { [void](Open-CodeIntegrityEventViewer) }
+                }
             }
-            '6' { Open-CoreIsolation }
-            '7' { $diag=Get-HvciDiagnostics; Show-HvciDiagnostics -Diagnostics $diag }
-            '8' { Open-CodeIntegrityEventViewer }
-            'P' {
-                if (Test-MenuActionSelectable -State $state -Key 'P') { $plan=Get-ChangePlan -State $state -Target Safe; $script:PlannedChanges=@($plan); Show-ChangePlan -Plan $plan }
-            }
-            'A' {
-                if (Test-MenuActionSelectable -State $state -Key 'A') { Enable-AllRecommended -State $state; $state=Get-SystemState; $script:FinalState=$state; Show-State -State $state }
-            }
-            'R' { $state=Get-SystemState; $script:FinalState=$state; Save-ReportInteractive -State $state }
-            'Q' { Invoke-InteractiveExit -State $state; return }
         }
+        Wait-ForKey
     }
 }
 
-function Main {
-    if ($Version) {
-        [Console]::Out.WriteLine(('{0} {1}' -f $script:ToolName,$script:ToolVersion))
-        return 0
-    }
-    if ($SelfTest) { return (Invoke-WinDSHSelfTest) }
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
-    Request-Elevation
-    Initialize-DebugLogging
-    [void](Invoke-SelfIntegrityCheck)
-    $nonInteractive = Resolve-InvocationMode
+function Invoke-Main {
+    Initialize-Console -DisableColor:$NoColor
 
-    if ($nonInteractive) {
-        if ($RMM) {
-            # Suppress Write-Host/information-stream UI from nested remediation code.
-            $rc = & { Invoke-Unattended } 6>$null
-            $stateForOutput = if ($script:FinalState) { $script:FinalState } else { $script:InitialState }
-            $rmmObject = New-RmmResult -State $stateForOutput -ExitCode $rc
-            [Console]::Out.WriteLine(($rmmObject | ConvertTo-Json -Compress -Depth 14))
-            return $rc
+    if ($Version) { Write-Host ('{0} {1}' -f $script:ToolName, $script:ToolVersion); $script:ExitCode = 0; return }
+    if ($SelfTest) { $script:ExitCode = (Invoke-SelfTest); return }
+
+    if ($ListControls) {
+        Write-Section 'Control catalog'
+        foreach ($c in $script:ControlCatalog) {
+            $cisText = if ($c.Cis) { $c.Cis.Id } else { '-' }
+            Write-Line ('{0,-22} {1,-8} weight {2,-4} {3}' -f $c.Id, $cisText, $c.Weight, $c.Name) 'Plain'
+            Write-Line $c.Summary 'Dim' 4
         }
-        return (Invoke-Unattended)
+        $script:ExitCode = 0; return
     }
 
-    Invoke-Interactive
-    return 0
+    if ($AuditOnly -and ($EnableAllSafe -or $Enable -or $Revert)) {
+        Write-Line '-AuditOnly cannot be combined with a change switch.' 'Bad'
+        $script:ExitCode = 1; return
+    }
+    if ($AutoReboot -and -not ($EnableAllSafe -or $Enable -or $Revert)) {
+        Write-Line '-AutoReboot only applies to an unattended change run.' 'Bad'
+        $script:ExitCode = 1; return
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DebugLogPath)) {
+        $script:DebugEnabled = $true
+        $script:DebugPath = $DebugLogPath
+        Write-Debug-Log ('{0} {1} starting' -f $script:ToolName, $script:ToolVersion)
+    }
+
+    if (-not (Test-IsElevated)) {
+        # Try to elevate ourselves first. Telling a non-technical user to "run as
+        # administrator" and exiting is not a workable instruction for this audience.
+        if (Request-Elevation -Bound $PSBoundParameters) { return }
+        Write-Line 'WinDSH needs to run as Administrator to read platform security state.' 'Bad'
+        Write-Line 'Right-click PowerShell, choose "Run as administrator", then run it again.' 'Info'
+        Write-Line 'Or use Run-WinDSH-AsAdmin.bat, which requests elevation for you.' 'Info'
+        $script:ExitCode = 4; return
+    }
+
+    $integrity = Get-SelfIntegrity
+    if ($integrity.Status -eq 'Failed') {
+        Write-Line 'Self-integrity check FAILED: this file does not match its recorded hash.' 'Bad'
+        Write-Line 'Auditing will continue, but making changes is disabled. Download a fresh copy.' 'Warn'
+        $script:RemediationAllowed = $false
+        $script:ExitCode = 3
+    }
+
+    $State = Get-SystemState
+    if ($State.Computer.IsVirtual) {
+        Add-Warning 'This is a virtual machine. Platform security features depend on what the host exposes.'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Explain)) {
+        $id = $Explain.Trim().ToLowerInvariant()
+        if (-not (Test-Contains (Get-ControlIds) $id)) {
+            Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
+            $script:ExitCode = 1; return
+        }
+        Show-Explanation (Get-ControlExplanation -Id $id -State $State)
+        $script:ExitCode = 0; return
+    }
+
+    if ($Revert) {
+        if (-not $script:RemediationAllowed) { Write-Line 'Revert is disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
+        try {
+            $result = Invoke-ControlRevert -RunId $RunId
+            Write-Section 'Revert'
+            foreach ($r in $result.Reverted) { Write-Line ('{0}\{1} restored to {2}' -f $r.Path, $r.Name, $r.RestoredTo) 'Good' 2 }
+            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Good'
+            $script:ExitCode = $(if ($result.RestartRequired) { 3010 } else { 0 }); return
+        }
+        catch {
+            Write-Line ('Revert failed: {0}' -f $_.Exception.Message) 'Bad'
+            $script:ExitCode = 5; return
+        }
+    }
+
+    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Rmm)
+    # Confirm-Action reads this: prompts are interactive-only, because a prompt on an
+    # unattended run would hang waiting for a user who is not there.
+    $script:Unattended = $unattended
+
+    if ($EnableAllSafe -or $Enable) {
+        if (-not $script:RemediationAllowed) { Write-Line 'Changes are disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
+        $ids = if ($Enable) { @($Enable) } else { $script:SafeControlSet }
+        foreach ($id in $ids) {
+            if (-not (Test-Contains (Get-ControlIds) $id)) { Write-Line ('Unknown control "{0}".' -f $id) 'Bad'; $script:ExitCode = 1; return }
+        }
+
+        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State) }
+        else {
+            $result = Invoke-ControlApply -Ids $ids -State $State
+            Write-Section 'Changes'
+            if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
+            foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
+            foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
+            if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            $State = Get-SystemState -Volatile
+        }
+    }
+
+    $statuses = Get-AllControlStatus -State $State
+    $score = Get-SecurityScore -Statuses $statuses
+    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
+    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
+    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
+
+    if ($Rmm) {
+        if ($script:RestartRequired) { $script:ExitCode = 3010 }
+        Write-RmmOutput -State $State -Statuses $statuses -Score $score -Cis $cis
+        $script:ExitCode = $script:ExitCode; return
+    }
+
+    if ($unattended) {
+        Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
+        Show-NextSteps -Explanations $explanations
+        if ($Advanced) { Show-CisSummary -Cis $cis }
+        $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+        foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
+    }
+    else {
+        Invoke-Interactive -State $State
+    }
+
+    foreach ($w in $script:Warnings) { Write-Line $w 'Warn' }
+
+    if ($unattended -and -not $Rmm) {
+        $final = if ($script:RestartRequired) { 3010 } elseif ($script:ExitCode -ne 0) { $script:ExitCode } elseif (@($script:Warnings).Count -gt 0) { 2 } else { 0 }
+        Write-Line ''
+        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $final)) 'Dim'
+    }
+
+    if ($script:RestartRequired) {
+        if ($AutoReboot) { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force; $script:ExitCode = 3010; return }
+        $script:ExitCode = 3010; return
+    }
+    if ($script:ExitCode -ne 0) { $script:ExitCode = $script:ExitCode; return }
+    if (@($script:Warnings).Count -gt 0) { $script:ExitCode = 2; return }
+    $script:ExitCode = 0; return
 }
 
-try {
-    $mainResult = Main
-    if ($null -eq $mainResult) { $mainResult = 0 }
-    Exit-WinDSH -Code ([int]$mainResult) -Reason 'WinDSH has finished.'
-}
-catch {
-    Write-DebugException -Stage 'Unhandled top-level failure' -ErrorRecord $_
-    if ($RMM) {
-        $obj = [ordered]@{
-            schemaVersion = $script:SchemaVersion
-            tool = $script:ToolName
-            version = $script:ToolVersion
-            exitCode = 1
-            status = 'FatalError'
-            message = $_.Exception.Message
-        }
-        [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 5))
-        exit 1
-    }
-    Write-Host ''
-    Write-Host ('Fatal error: {0}' -f $_.Exception.Message) -ForegroundColor Red
-    if ($_.InvocationInfo) {
-        $where = $_.InvocationInfo.PositionMessage
-        if (-not [string]::IsNullOrWhiteSpace($where)) {
-            Write-Host 'Error location:' -ForegroundColor Yellow
-            Write-Host $where -ForegroundColor DarkGray
-        }
-    }
-    Write-Host 'The error is shown intentionally; this tool does not suppress or hide failures.' -ForegroundColor Gray
-    if ($script:DebugEnabled -and $script:ResolvedDebugLogPath) { Write-Host ('Debug log: {0}' -f $script:ResolvedDebugLogPath) -ForegroundColor Cyan }
-    Exit-WinDSH -Code 1 -Reason 'WinDSH stopped because of the error shown above.'
-}
+# Invoke-Main sets $script:ExitCode itself. Its output is NOT captured, so RMM mode
+# can emit its JSON object on stdout for a pipeline to consume.
+Invoke-Main
+exit $script:ExitCode

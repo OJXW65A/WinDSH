@@ -91,6 +91,66 @@ Be especially careful with:
 - registry values that may not exist
 - provider behavior that varies between Windows versions
 
+## Source layout and building (IMPORTANT)
+
+`WinDSH.ps1` in the repository root is **generated**. Do not edit it by hand.
+
+Source lives in `src/` as ordered modules:
+
+```
+src/10-core.ps1          parameters, output, registry provider, elevation, integrity
+src/20-catalog.ps1       the control catalog - single source of truth
+src/30-state.ps1         system state collection
+src/40-evaluate.ps1      status, scoring, CIS comparison, explainer
+src/45-firmware.ps1      BIOS/UEFI guidance and Code Integrity diagnostics
+src/50-apply.ps1         plan, pre-flight, confirmation, apply, journal, revert
+src/55-report-text.ps1   plain-text report
+src/60-report-html.ps1   HTML report
+src/65-selftest.ps1      synthetic self-test
+src/70-main.ps1          console rendering, menu, entry point
+```
+
+After any edit under `src/`, run:
+
+```powershell
+.\build\Build-WinDSH.ps1
+```
+
+This concatenates the modules into `WinDSH.ps1` and stamps the self-integrity hash. If the
+hash is stale, the shipped script warns every user and **disables all remediation** for
+that run (exit code 3). CI fails the build if `WinDSH.ps1` has drifted from `src/`.
+
+Verify without writing:
+
+```powershell
+.\build\Build-WinDSH.ps1 -Check
+```
+
+## Adding a control
+
+Settings are declarative. A new control is **one entry in `src/20-catalog.ps1`**, not
+edits across several functions. Audit, preview, apply, revert, scoring, CIS comparison,
+the explainer and all report formats read that entry.
+
+If you find yourself writing per-feature logic in more than one place, the catalog is
+missing a field.
+
+## PowerShell compatibility traps
+
+Code must run on Windows PowerShell 5.1 and PowerShell 7. These have each caused a real
+defect in this project:
+
+- Variable names are case-insensitive: a local `$state` shadows a `$State` parameter.
+- `$True`, `$False`, `$args`, `$host`, `$input` and `$matches` are automatic variables and
+  cannot be used as parameter or variable names.
+- `(if ...)` as a sub-expression parses on 7 and fails on 5.1. Use `$(if ...)`.
+- StrictMode 2.0 throws on a missing property. Use `Get-PropertySafe`, or give every object
+  in a collection the same shape.
+- A single-item result is a scalar. Wrap with `@(...)` before using `.Count`.
+- Assigning a function's output to a variable captures its whole output stream.
+
+Add a regression test for every bug you fix.
+
 ## Running the tests
 
 WinDSH uses Pester regression tests.
@@ -103,10 +163,15 @@ Invoke-Pester -Path .\tests
 
 The GitHub Actions CI workflow also checks:
 
+- `CHANGELOG.md` has an entry for the declared version
+- `WinDSH.ps1` is current with `src/`
 - Windows PowerShell 5.1 parsing
 - PowerShell 7 parsing
-- PSScriptAnalyzer
-- Pester regression tests
+- PSScriptAnalyzer (build fails on Error severity)
+- Pester regression tests on both runtimes
+- a live `-AuditOnly` run produces a structurally valid JSON report
+- `-RMM` emits exactly one JSON object on stdout
+- `-EnableAllSafe -WhatIf` makes no registry changes
 
 All CI jobs should pass before a pull request is considered ready.
 
@@ -191,12 +256,22 @@ Do not commit generated content such as:
 
 The repository `.gitignore` excludes common generated files.
 
+## Releases
+
+Releases are produced only by `.github/workflows/release.yml`, triggered by pushing a
+tag such as `v1.5.1`. The workflow verifies the integrity hash, checks the tag matches
+`$script:ToolVersion`, runs the tests, builds the artifact set, generates `SHA256SUMS`,
+and opens a draft GitHub Release.
+
+Do not hand-upload release assets. An artifact that was not built by the workflow cannot
+be attested and breaks the chain between the published file and this source.
+
 ## Code signing
 
 Do not add private keys, signing credentials, API tokens, certificate passwords,
 or signing-service secrets to the repository.
 
-Official signing behavior is described in
+WinDSH is currently unsigned. Signing status and policy are described in
 [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
 
 ## License

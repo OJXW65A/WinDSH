@@ -2,249 +2,207 @@ name: WinDSH CI
 
 on:
   push:
-    branches:
-      - main
-
+    branches: [main]
   pull_request:
-    branches:
-      - main
-
+    branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PSSCRIPTANALYZER_VERSION: '1.24.0'
+  PESTER_VERSION: '5.9.1'
+
 jobs:
-  powershell-51:
-    name: Windows PowerShell 5.1
+  # WinDSH.ps1 is generated from src/. This guards the one mistake that would ship a
+  # build whose integrity hash is stale, which disables all remediation for every user.
+  build:
+    name: Built file is current
     runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify WinDSH.ps1 matches src/
+        shell: powershell
+        run: |
+          .\build\Build-WinDSH.ps1 -Check
+          if ($LASTEXITCODE -ne 0) {
+              Write-Host '::error::WinDSH.ps1 is out of date with src/.'
+              Write-Host '::error::Run .\build\Build-WinDSH.ps1 and commit the result.'
+              exit 1
+          }
+
+      - name: Verify CHANGELOG mentions the declared version
+        shell: powershell
+        run: |
+          $version = [regex]::Match((Get-Content -Raw .\WinDSH.ps1), "ToolVersion\s*=\s*'([^']+)'").Groups[1].Value
+          Write-Host "Script version: $version"
+          if ((Get-Content -Raw .\CHANGELOG.md) -notmatch [regex]::Escape($version)) {
+              Write-Host "::error::CHANGELOG.md has no entry for version $version."
+              exit 1
+          }
+
+  analyze:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    # The matrix context is not available on a step's `shell:` key, which made the
+    # whole workflow fail validation before any job could start. It is available on
+    # the job's run defaults, which apply to every step here.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1
+            shell: powershell
+          - name: PowerShell 7
+            shell: pwsh
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
       - name: Show PowerShell version
-        shell: powershell
+        run: $PSVersionTable | Format-List
+
+      - name: Parse all sources
         run: |
-          $PSVersionTable
-
-      - name: Parse WinDSH.ps1
-        shell: powershell
-        run: |
-          $tokens = $null
-          $parseErrors = $null
-
-          [System.Management.Automation.Language.Parser]::ParseFile(
-              "$env:GITHUB_WORKSPACE\WinDSH.ps1",
-              [ref]$tokens,
-              [ref]$parseErrors
-          ) | Out-Null
-
-          if (@($parseErrors).Count -gt 0) {
-              Write-Host "PowerShell syntax errors found:" -ForegroundColor Red
-
-              $parseErrors |
-                  Format-List Message, Extent, ErrorId
-
-              exit 1
+          $failed = $false
+          $targets = @(Get-ChildItem "$env:GITHUB_WORKSPACE\src" -Filter *.ps1) +
+                     @(Get-Item "$env:GITHUB_WORKSPACE\WinDSH.ps1") +
+                     @(Get-Item "$env:GITHUB_WORKSPACE\build\Build-WinDSH.ps1")
+          foreach ($t in $targets) {
+              $parseErrors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($t.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
+              if (@($parseErrors).Count -gt 0) {
+                  Write-Host "::error file=$($t.Name)::$(@($parseErrors).Count) syntax error(s)"
+                  $parseErrors | Format-List Message, Extent
+                  $failed = $true
+              }
           }
-
-          Write-Host "Windows PowerShell 5.1 syntax check passed." -ForegroundColor Green
+          if ($failed) { exit 1 }
+          Write-Host "Syntax check passed for $(@($targets).Count) file(s)."
 
       - name: Install PSScriptAnalyzer
-        shell: powershell
         run: |
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          Install-Module PSScriptAnalyzer `
-              -Scope CurrentUser `
-              -Force `
-              -Repository PSGallery
+          Install-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION `
+              -Scope CurrentUser -Force -Repository PSGallery
 
       - name: Run PSScriptAnalyzer
-        shell: powershell
         run: |
-          $results = @(
-              Invoke-ScriptAnalyzer `
-                  -Path "$env:GITHUB_WORKSPACE\WinDSH.ps1"
-          )
+          # Analyse src/ rather than the generated file, so findings point at real source.
+          $results = @(Invoke-ScriptAnalyzer -Path "$env:GITHUB_WORKSPACE\src" -Recurse) +
+                     @(Invoke-ScriptAnalyzer -Path "$env:GITHUB_WORKSPACE\build")
 
           if ($results.Count -gt 0) {
-              $results |
-                  Select-Object RuleName, Severity, Line, Message |
-                  Format-Table -AutoSize
+              $results | Select-Object RuleName, Severity, Line, ScriptName, Message |
+                  Format-Table -AutoSize | Out-String -Width 240 | Write-Host
           }
 
-          $errors = @(
-              $results |
-                  Where-Object {
-                      $_.Severity -eq 'Error'
-                  }
-          )
-
+          $errors = @($results | Where-Object { $_.Severity -eq 'Error' })
           if ($errors.Count -gt 0) {
-              Write-Host ""
-              Write-Host "PSScriptAnalyzer errors detected." -ForegroundColor Red
+              Write-Host "::error::PSScriptAnalyzer reported $($errors.Count) error(s)."
               exit 1
           }
-
-          Write-Host ""
-          Write-Host "PSScriptAnalyzer completed without errors." -ForegroundColor Green
+          foreach ($w in @($results | Where-Object { $_.Severity -eq 'Warning' })) {
+              Write-Host "::warning file=$($w.ScriptName),line=$($w.Line)::$($w.RuleName): $($w.Message)"
+          }
+          Write-Host "PSScriptAnalyzer: 0 errors."
 
       - name: Install Pester
-        shell: powershell
         run: |
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          Install-Module Pester `
-              -RequiredVersion 5.9.1 `
-              -Scope CurrentUser `
-              -Force `
-              -Repository PSGallery
+          Install-Module Pester -RequiredVersion $env:PESTER_VERSION `
+              -Scope CurrentUser -Force -Repository PSGallery
 
       - name: Run Pester tests
-        shell: powershell
         run: |
-          Import-Module Pester `
-              -RequiredVersion 5.9.1 `
-              -Force
-
+          Import-Module Pester -RequiredVersion $env:PESTER_VERSION -Force
           $configuration = New-PesterConfiguration
-
           $configuration.Run.Path = "$env:GITHUB_WORKSPACE\tests"
           $configuration.Run.PassThru = $true
-
           $configuration.Output.Verbosity = 'Detailed'
-
-          $result = Invoke-Pester `
-              -Configuration $configuration
-
+          $result = Invoke-Pester -Configuration $configuration
           if ($result.FailedCount -gt 0) {
-              Write-Host ""
-              Write-Host (
-                  "Pester failed: {0} test(s) failed." -f
-                  $result.FailedCount
-              ) -ForegroundColor Red
-
+              Write-Host "::error::Pester failed: $($result.FailedCount) test(s)."
               exit 1
           }
+          Write-Host "Pester passed: $($result.PassedCount) test(s)."
 
-          Write-Host ""
-          Write-Host (
-              "Pester passed: {0} test(s)." -f
-              $result.PassedCount
-          ) -ForegroundColor Green
-
-
-  powershell-7:
-    name: PowerShell 7
+  # Exercises the collector chain against a real Windows machine. GitHub runners are
+  # elevated, so the live audit path runs. This is the coverage synthetic tests cannot give.
+  audit-smoke:
+    name: Live audit smoke test
     runs-on: windows-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-      - name: Show PowerShell version
-        shell: pwsh
+      - name: Real audit, all three report formats
+        shell: powershell
         run: |
-          $PSVersionTable
-
-      - name: Parse WinDSH.ps1
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $parseErrors = $null
-
-          [System.Management.Automation.Language.Parser]::ParseFile(
-              "$env:GITHUB_WORKSPACE\WinDSH.ps1",
-              [ref]$tokens,
-              [ref]$parseErrors
-          ) | Out-Null
-
-          if (@($parseErrors).Count -gt 0) {
-              Write-Host "PowerShell syntax errors found."
-
-              $parseErrors |
-                  Format-List Message, Extent, ErrorId
-
+          .\WinDSH.ps1 -AuditOnly -HtmlReport -JsonReport -TextReport -ReportDirectory "$env:GITHUB_WORKSPACE\ci-report"
+          $code = $LASTEXITCODE
+          Write-Host "Exit code: $code"
+          if ($code -ne 0 -and $code -ne 2 -and $code -ne 3010) {
+              Write-Host "::error::Audit returned unexpected exit code $code."
               exit 1
           }
+          # WinDSH's own non-zero-but-accepted exit code stays in $LASTEXITCODE and
+          # would fail the step regardless of the check above. Land on 0 explicitly.
+          exit 0
 
-          Write-Host "PowerShell 7 syntax check passed."
-
-      - name: Install PSScriptAnalyzer
-        shell: pwsh
+      - name: Validate the reports
+        shell: powershell
         run: |
-          Install-Module PSScriptAnalyzer `
-              -Scope CurrentUser `
-              -Force `
-              -Repository PSGallery
-
-      - name: Run PSScriptAnalyzer
-        shell: pwsh
-        run: |
-          $results = @(
-              Invoke-ScriptAnalyzer `
-                  -Path "$env:GITHUB_WORKSPACE\WinDSH.ps1"
-          )
-
-          if ($results.Count -gt 0) {
-              $results |
-                  Select-Object RuleName, Severity, Line, Message |
-                  Format-Table -AutoSize
+          foreach ($ext in 'html', 'json', 'txt') {
+              $file = Get-ChildItem "$env:GITHUB_WORKSPACE\ci-report\*.$ext" | Select-Object -First 1
+              if (-not $file) { Write-Host "::error::No .$ext report was produced."; exit 1 }
+              Write-Host "$ext report: $($file.Name) ($($file.Length) bytes)"
           }
 
-          $errors = @(
-              $results |
-                  Where-Object {
-                      $_.Severity -eq 'Error'
-                  }
-          )
+          $json = Get-Content -Raw (Get-ChildItem "$env:GITHUB_WORKSPACE\ci-report\*.json" | Select-Object -First 1) | ConvertFrom-Json
+          foreach ($field in 'SchemaVersion', 'Tool', 'Score', 'Controls', 'Cis') {
+              if ($null -eq $json.$field) { Write-Host "::error::JSON report missing field: $field"; exit 1 }
+          }
+          Write-Host "Score: $($json.Score.Score)/100 ($($json.Score.Grade))"
 
-          if ($errors.Count -gt 0) {
-              Write-Host ""
-              Write-Host "PSScriptAnalyzer errors detected."
+          $html = Get-Content -Raw (Get-ChildItem "$env:GITHUB_WORKSPACE\ci-report\*.html" | Select-Object -First 1)
+          if ($html -match '<script' -or $html -match 'https?://[^"]*\.(css|js)') {
+              Write-Host '::error::HTML report is not self-contained.'
               exit 1
           }
+          Write-Host 'Reports validated.'
 
-          Write-Host ""
-          Write-Host "PSScriptAnalyzer completed without errors."
-
-      - name: Install Pester
-        shell: pwsh
+      - name: RMM mode emits exactly one JSON object
+        shell: powershell
         run: |
-          Install-Module Pester `
-              -RequiredVersion 5.9.1 `
-              -Scope CurrentUser `
-              -Force `
-              -Repository PSGallery
-
-      - name: Run Pester tests
-        shell: pwsh
-        run: |
-          Import-Module Pester `
-              -RequiredVersion 5.9.1 `
-              -Force
-
-          $configuration = New-PesterConfiguration
-
-          $configuration.Run.Path = "$env:GITHUB_WORKSPACE\tests"
-          $configuration.Run.PassThru = $true
-
-          $configuration.Output.Verbosity = 'Detailed'
-
-          $result = Invoke-Pester `
-              -Configuration $configuration
-
-          if ($result.FailedCount -gt 0) {
-              Write-Host ""
-              Write-Host (
-                  "Pester failed: {0} test(s) failed." -f
-                  $result.FailedCount
-              )
-
+          $lines = @(& .\WinDSH.ps1 -AuditOnly -Rmm | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+          if ($lines.Count -ne 1) {
+              Write-Host "::error::RMM mode emitted $($lines.Count) lines, expected 1."
+              $lines | ForEach-Object { Write-Host $_ }
               exit 1
           }
+          $obj = $lines[0] | ConvertFrom-Json
+          Write-Host "RMM score: $($obj.score)"
+          exit 0
 
-          Write-Host ""
-          Write-Host (
-              "Pester passed: {0} test(s)." -f
-              $result.PassedCount
-          )
+      - name: Preview mode writes nothing
+        shell: powershell
+        run: |
+          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
+          $before = Get-ItemProperty $key -ErrorAction SilentlyContinue | ConvertTo-Json -Compress
+          .\WinDSH.ps1 -EnableAllSafe -WhatIf -NoReport | Out-Null
+          $after = Get-ItemProperty $key -ErrorAction SilentlyContinue | ConvertTo-Json -Compress
+          if ($before -ne $after) {
+              Write-Host '::error::-WhatIf modified the DeviceGuard registry key.'
+              exit 1
+          }
+          Write-Host '-WhatIf made no registry changes, as expected.'
+          exit 0
