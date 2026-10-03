@@ -149,7 +149,7 @@ $script:SchemaVersion   = '2.0'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = '673a9db0f2b0793fcaa611b7535b4041cd9fe190e417b0ffabcd0df5d01a924c'
+$script:ExpectedIntegrityHash = '681a8d04e1583527a3fc0479ff066d21b07f1ae7590ad6ef6d9af450727986af'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -3959,7 +3959,7 @@ function Invoke-Main {
         Write-Section 'Control catalog'
         foreach ($c in $script:ControlCatalog) {
             $cisText = if ($c.Cis) { $c.Cis.Id } else { '-' }
-            Write-Line ('{0,-22} {1,-8} weight {2,-4} {3}' -f $c.Id, $cisText, $c.Weight, $c.Name) 'Plain'
+            Write-Line ('{0,-25} {1,-8} weight {2,-4} {3}' -f $c.Id, $cisText, $c.Weight, $c.Name) 'Plain'
             Write-Line $c.Summary 'Dim' 4
         }
         $script:ExitCode = 0; return
