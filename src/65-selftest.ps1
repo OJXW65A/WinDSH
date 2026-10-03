@@ -40,6 +40,9 @@ function New-SyntheticState {
 }
 
 function Invoke-SelfTest {
+    # Scoped event provider: self-tests never query the real host's compatibility log.
+    $ciEvidence = [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null }
+    function Get-CodeIntegrityEvents { param($EventIds, $LookbackDays) return $ciEvidence }
     $pass = 0; $fail = 0
     function Assert-That {
         param([string]$Name, [bool]$Condition, [string]$Detail = '')
@@ -184,6 +187,33 @@ function Invoke-SelfTest {
     Assert-That 'Pre-flight watches Event ID 3087' (@($hvciControl.Preflight.EventIds) -contains 3087)
     Assert-That 'Pre-flight blocks the safe set when tripped' ([bool]$hvciControl.Preflight.BlocksSafeSet)
 
+    $ciEvidence.EventCount = 1
+    $riskPlan = @(Get-ChangePlan -Ids $script:SafeControlSet -State $clean)
+    Assert-That 'Safe-set preview includes HVCI preflight blockers' (@($riskPlan | Where-Object { $_.ControlId -eq 'hvci' -and $_.SkipReason }).Count -eq 2)
+    $riskJournal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-preflight-{0}.jsonl' -f [Guid]::NewGuid())
+    $env:WINDSH_JOURNAL_PATH = $riskJournal
+    try {
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $safeRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'EnableAllSafe skips HVCI when 3087 evidence is present' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        Assert-That 'Safe-set apply reports the same preflight blocker as preview' (@($safeRisk.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
+        $explicitRisk = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
+        Assert-That 'Explicit unattended HVCI cannot bypass a typed override' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $ciEvidence.EventCount = 0
+        $ciEvidence.Queried = $false
+        $unknownRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'Unknown compatibility fails closed for the safe set' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $depRisk = @(Get-ChangePlan -Ids @('kernel-shadow-stacks') -State $clean)
+        Assert-That 'A preflight-blocked dependency also blocks shadow stacks' (@($depRisk | Where-Object { $_.ControlId -eq 'kernel-shadow-stacks' -and $_.SkipReason }).Count -eq 1)
+    }
+    finally {
+        $ciEvidence.Queried = $true
+        $ciEvidence.EventCount = 0
+        Remove-Item -LiteralPath $riskJournal -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:\WINDSH_JOURNAL_PATH -ErrorAction SilentlyContinue
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+    }
+
     # --- firmware guidance (restored from v1.6.0) ---
     $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
     Assert-That 'Dell firmware hints are matched' (($hintDell.Vendor -eq 'Dell') -and ($hintDell.EnterKey -match 'F2')) $hintDell.Vendor
@@ -213,6 +243,7 @@ function Invoke-SelfTest {
     $previousUnattended = $script:Unattended
     $script:Unattended = $true
     Assert-That 'Unattended runs never block on a confirmation prompt' (Confirm-Action 'This must not prompt')
+    Assert-That 'Unattended consent does not satisfy typed safety confirmation' (-not (Confirm-Action 'Risky' -RequireTyped 'hvci'))
     $script:Unattended = $previousUnattended
 
     # --- virtual machine assessment (restored from v1.6.0) ---

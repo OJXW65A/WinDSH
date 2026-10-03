@@ -357,7 +357,8 @@ function Confirm-Action {
         [string]$RequireTyped
     )
 
-    if ($script:Unattended) { return $true }
+    # Invocation consent covers ordinary changes, never a typed safety override.
+    if ($script:Unattended) { return [bool](-not $RequireTyped) }
 
     if ($RequireTyped) {
         Write-Line ('Type {0} to continue, or anything else to cancel.' -f $RequireTyped) 'Warn'

@@ -168,9 +168,9 @@ function Get-ControlPreflight {
 
             return [pscustomobject]@{
                 Kind = $preflight.Kind
-                Tripped = [bool]($events.EventCount -gt 0)
+                Tripped = [bool](-not $events.Queried -or $events.EventCount -gt 0)
                 BlocksSafeSet = [bool]$preflight.BlocksSafeSet
-                Message = $preflight.Message
+                Message = if ($events.Queried) { $preflight.Message } else { 'Could not verify driver compatibility because the Code Integrity log could not be queried.' }
                 EventCount = $events.EventCount
                 Drivers = $events.Drivers
                 Newest = $events.Newest

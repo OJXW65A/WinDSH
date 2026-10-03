@@ -366,7 +366,7 @@ function Invoke-Interactive {
                     'B' {
                         $id = Select-ControlInteractive
                         if ($id) {
-                            $result = Invoke-ControlApply -Ids @($id) -State $State
+                            $result = Invoke-ControlApply -Ids @($id) -State $State -ExplicitIds @($id)
                             Write-Section 'Result'
                             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
@@ -507,9 +507,9 @@ function Invoke-Main {
             if (-not (Test-Contains (Get-ControlIds) $id)) { Write-Line ('Unknown control "{0}".' -f $id) 'Bad'; $script:ExitCode = 1; return }
         }
 
-        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State) }
+        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State -ExplicitIds @($Enable)) }
         else {
-            $result = Invoke-ControlApply -Ids $ids -State $State
+            $result = Invoke-ControlApply -Ids $ids -State $State -ExplicitIds @($Enable)
             Write-Section 'Changes'
             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }

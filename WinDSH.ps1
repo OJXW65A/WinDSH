@@ -122,7 +122,7 @@ $script:SchemaVersion   = '2.0'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = 'e933d2fd5439ab243174f62446968c2ed937864d046f1b303761ed42aa7de7f9'
+$script:ExpectedIntegrityHash = '80bcb205d68021970ac597a3cf40a571a7852bbf99c958af143ffe6e35742314'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -356,7 +356,8 @@ function Confirm-Action {
         [string]$RequireTyped
     )
 
-    if ($script:Unattended) { return $true }
+    # Invocation consent covers ordinary changes, never a typed safety override.
+    if ($script:Unattended) { return [bool](-not $RequireTyped) }
 
     if ($RequireTyped) {
         Write-Line ('Type {0} to continue, or anything else to cancel.' -f $RequireTyped) 'Warn'
@@ -1205,7 +1206,7 @@ function Get-CodeIntegrityEvents {
         }
         catch {
             # "No events were found" is a normal, healthy outcome, not an error.
-            if ($_.Exception.Message -match 'No events were found') { $result.Queried = $true; $result.LogAvailable = $true }
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $result.Queried = $true; $result.LogAvailable = $true }
             else { $result.Error = $_.Exception.Message; Write-DebugError ('Read {0}' -f $log) $_ }
         }
     }
@@ -1543,9 +1544,9 @@ function Get-ControlPreflight {
 
             return [pscustomobject]@{
                 Kind = $preflight.Kind
-                Tripped = [bool]($events.EventCount -gt 0)
+                Tripped = [bool](-not $events.Queried -or $events.EventCount -gt 0)
                 BlocksSafeSet = [bool]$preflight.BlocksSafeSet
-                Message = $preflight.Message
+                Message = if ($events.Queried) { $preflight.Message } else { 'Could not verify driver compatibility because the Code Integrity log could not be queried.' }
                 EventCount = $events.EventCount
                 Drivers = $events.Drivers
                 Newest = $events.Newest
@@ -2244,7 +2245,8 @@ function Get-ControlDelta {
 function Get-ChangePlan {
     param(
         [Parameter(Mandatory = $true)][string[]]$Ids,
-        [Parameter(Mandatory = $true)]$State
+        [Parameter(Mandatory = $true)]$State,
+        [string[]]$ExplicitIds = @()
     )
     $plan = @()
     $seen = @{}
@@ -2254,7 +2256,21 @@ function Get-ChangePlan {
             $seen[$control.Id] = $true
 
             $status = Get-ControlStatus -Id $control.Id -State $State
-            foreach ($row in (Get-ControlDelta -Id $control.Id)) {
+            $preflight = $null
+            $deltas = @(Get-ControlDelta -Id $control.Id)
+            if ($status.Supported -and -not $status.ManagedByPolicy -and @($deltas | Where-Object { $_.NeedsChange }).Count -gt 0) {
+                $preflight = Get-ControlPreflight -Control $control
+            }
+            $requiresOverride = [bool]($preflight -and $preflight.Tripped -and $preflight.BlocksSafeSet)
+            $explicit = [bool]($ExplicitIds -contains $control.Id)
+            $skip = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
+                    elseif (-not $status.Supported) { $status.SupportReason }
+                    elseif ($requiresOverride) {
+                        if ($explicit -and -not $script:Unattended) { $preflight.Message + ' A typed override is required.' }
+                        else { $preflight.Message + ' Skipped for safety; use the interactive specific-control menu to confirm an override.' }
+                    }
+                    else { $null }
+            foreach ($row in $deltas) {
                 $plan += [pscustomobject]@{
                     ControlId = $row.ControlId
                     ControlName = $row.ControlName
@@ -2268,10 +2284,22 @@ function Get-ChangePlan {
                     Note = $row.Note
                     ManagedByPolicy = $status.ManagedByPolicy
                     Supported = $status.Supported
-                    SkipReason = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
-                                 elseif (-not $status.Supported) { $status.SupportReason }
-                                 else { $null }
+                    ExplicitlyRequested = $explicit
+                    Preflight = $preflight
+                    RequiresOverride = $requiresOverride
+                    SkipReason = $skip
                 }
+            }
+        }
+    }
+    # A dependent cannot be enabled when its required protection is blocked.
+    foreach ($row in $plan) {
+        if ($row.SkipReason) { continue }
+        foreach ($dep in (ConvertTo-Array (Get-Control -Id $row.ControlId).Requires)) {
+            $blockedDep = @($plan | Where-Object { $_.ControlId -eq $dep -and $_.SkipReason })
+            if ($blockedDep.Count -gt 0) {
+                $row.SkipReason = ('Required control {0} is blocked: {1}' -f $dep, $blockedDep[0].SkipReason)
+                break
             }
         }
     }
@@ -2334,47 +2362,38 @@ function Invoke-ControlApply {
     param(
         [Parameter(Mandatory = $true)][string[]]$Ids,
         [Parameter(Mandatory = $true)]$State,
-        [string]$RunId
+        [string]$RunId,
+        [string[]]$ExplicitIds = @()
     )
 
     if (-not $script:RemediationAllowed) { throw 'Remediation is disabled because the self-integrity check failed.' }
     if (-not $RunId) { $RunId = [Guid]::NewGuid().ToString('N').Substring(0, 12) }
 
     $applied = @(); $skipped = @()
-    $plan = Get-ChangePlan -Ids $Ids -State $State
+    $plan = @(Get-ChangePlan -Ids $Ids -State $State -ExplicitIds $ExplicitIds)
 
-    # --- pre-flight safety checks -----------------------------------------
-    # A control can declare evidence that makes applying it risky right now. In the safe
-    # set a tripped check skips the control outright; a user who explicitly named that
-    # control may override it, but only by typing its id.
-    $blocked = @{}
-    foreach ($controlId in (@($plan | Select-Object -ExpandProperty ControlId -Unique))) {
-        $control = Get-Control -Id $controlId
-        $preflight = Get-ControlPreflight -Control $control
-        if (-not $preflight -or -not $preflight.Tripped) { continue }
-
-        Write-Line ''
-        Write-Line ('{0}: {1}' -f $control.Name, $preflight.Message) 'Warn'
-        foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
-            $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
-            $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
-            Write-Line ('{0} ({1}, {2})' -f $d.FileName, $who, $ver) 'Warn' 2
+    # Both preview and apply consume the same safety decision. Only a specifically
+    # selected control in an interactive session can override a tripped check.
+    foreach ($group in ($plan | Group-Object ControlId)) {
+        $row = @($group.Group)[0]
+        if (-not $row.RequiresOverride -or -not $row.ExplicitlyRequested -or $script:Unattended -or $WhatIfPreference) { continue }
+        Write-Line $row.Preflight.Message 'Warn'
+        if (Confirm-Action ('Enable {0} anyway?' -f $row.ControlName) -RequireTyped $row.ControlId) {
+            foreach ($value in $group.Group) { $value.SkipReason = $null }
         }
-
-        $explicitlyRequested = [bool](@($Ids) -contains $controlId)
-        if (-not $explicitlyRequested) {
-            $blocked[$controlId] = 'Skipped for safety: recent driver-compatibility warnings.'
-            Write-Line 'Skipping it. Ask for it by name to override.' 'Info' 2
-            continue
-        }
-        if (-not (Confirm-Action ('Enable {0} anyway?' -f $control.Name) -RequireTyped $controlId)) {
-            $blocked[$controlId] = 'Cancelled: driver-compatibility warnings were not overridden.'
-            Write-Line 'Cancelled.' 'Info' 2
-        }
+    }
+    # Rebuild dependency decisions after a genuine override without repeating queries.
+    foreach ($row in $plan) {
+        if ($row.SkipReason -notlike 'Required control *') { continue }
+        $blockedDeps = @((Get-Control -Id $row.ControlId).Requires | Where-Object {
+            $depId = $_
+            @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason }).Count -gt 0
+        })
+        if ($blockedDeps.Count -eq 0) { $row.SkipReason = $null }
     }
 
     # --- confirmation -----------------------------------------------------
-    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason -and -not $blocked.ContainsKey($_.ControlId) })
+    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason })
     if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
         Write-Section 'About to change'
         foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
@@ -2392,12 +2411,6 @@ function Invoke-ControlApply {
     }
 
     foreach ($row in $plan) {
-        if ($blocked.ContainsKey($row.ControlId)) {
-            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
-                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $blocked[$row.ControlId] }
-            }
-            continue
-        }
         if ($row.SkipReason) {
             if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
                 $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
@@ -2882,6 +2895,9 @@ function New-SyntheticState {
 }
 
 function Invoke-SelfTest {
+    # Scoped event provider: self-tests never query the real host's compatibility log.
+    $ciEvidence = [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null }
+    function Get-CodeIntegrityEvents { param($EventIds, $LookbackDays) return $ciEvidence }
     $pass = 0; $fail = 0
     function Assert-That {
         param([string]$Name, [bool]$Condition, [string]$Detail = '')
@@ -3026,6 +3042,33 @@ function Invoke-SelfTest {
     Assert-That 'Pre-flight watches Event ID 3087' (@($hvciControl.Preflight.EventIds) -contains 3087)
     Assert-That 'Pre-flight blocks the safe set when tripped' ([bool]$hvciControl.Preflight.BlocksSafeSet)
 
+    $ciEvidence.EventCount = 1
+    $riskPlan = @(Get-ChangePlan -Ids $script:SafeControlSet -State $clean)
+    Assert-That 'Safe-set preview includes HVCI preflight blockers' (@($riskPlan | Where-Object { $_.ControlId -eq 'hvci' -and $_.SkipReason }).Count -eq 2)
+    $riskJournal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-preflight-{0}.jsonl' -f [Guid]::NewGuid())
+    $env:WINDSH_JOURNAL_PATH = $riskJournal
+    try {
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $safeRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'EnableAllSafe skips HVCI when 3087 evidence is present' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        Assert-That 'Safe-set apply reports the same preflight blocker as preview' (@($safeRisk.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
+        $explicitRisk = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
+        Assert-That 'Explicit unattended HVCI cannot bypass a typed override' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $ciEvidence.EventCount = 0
+        $ciEvidence.Queried = $false
+        $unknownRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'Unknown compatibility fails closed for the safe set' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $depRisk = @(Get-ChangePlan -Ids @('kernel-shadow-stacks') -State $clean)
+        Assert-That 'A preflight-blocked dependency also blocks shadow stacks' (@($depRisk | Where-Object { $_.ControlId -eq 'kernel-shadow-stacks' -and $_.SkipReason }).Count -eq 1)
+    }
+    finally {
+        $ciEvidence.Queried = $true
+        $ciEvidence.EventCount = 0
+        Remove-Item -LiteralPath $riskJournal -Force -ErrorAction SilentlyContinue
+        Remove-Item Env:\WINDSH_JOURNAL_PATH -ErrorAction SilentlyContinue
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+    }
+
     # --- firmware guidance (restored from v1.6.0) ---
     $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
     Assert-That 'Dell firmware hints are matched' (($hintDell.Vendor -eq 'Dell') -and ($hintDell.EnterKey -match 'F2')) $hintDell.Vendor
@@ -3055,6 +3098,7 @@ function Invoke-SelfTest {
     $previousUnattended = $script:Unattended
     $script:Unattended = $true
     Assert-That 'Unattended runs never block on a confirmation prompt' (Confirm-Action 'This must not prompt')
+    Assert-That 'Unattended consent does not satisfy typed safety confirmation' (-not (Confirm-Action 'Risky' -RequireTyped 'hvci'))
     $script:Unattended = $previousUnattended
 
     # --- virtual machine assessment (restored from v1.6.0) ---
@@ -3498,7 +3542,7 @@ function Invoke-Interactive {
                     'B' {
                         $id = Select-ControlInteractive
                         if ($id) {
-                            $result = Invoke-ControlApply -Ids @($id) -State $State
+                            $result = Invoke-ControlApply -Ids @($id) -State $State -ExplicitIds @($id)
                             Write-Section 'Result'
                             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
@@ -3639,9 +3683,9 @@ function Invoke-Main {
             if (-not (Test-Contains (Get-ControlIds) $id)) { Write-Line ('Unknown control "{0}".' -f $id) 'Bad'; $script:ExitCode = 1; return }
         }
 
-        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State) }
+        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State -ExplicitIds @($Enable)) }
         else {
-            $result = Invoke-ControlApply -Ids $ids -State $State
+            $result = Invoke-ControlApply -Ids $ids -State $State -ExplicitIds @($Enable)
             Write-Section 'Changes'
             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }

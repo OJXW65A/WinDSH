@@ -40,7 +40,8 @@ function Get-ControlDelta {
 function Get-ChangePlan {
     param(
         [Parameter(Mandatory = $true)][string[]]$Ids,
-        [Parameter(Mandatory = $true)]$State
+        [Parameter(Mandatory = $true)]$State,
+        [string[]]$ExplicitIds = @()
     )
     $plan = @()
     $seen = @{}
@@ -50,7 +51,21 @@ function Get-ChangePlan {
             $seen[$control.Id] = $true
 
             $status = Get-ControlStatus -Id $control.Id -State $State
-            foreach ($row in (Get-ControlDelta -Id $control.Id)) {
+            $preflight = $null
+            $deltas = @(Get-ControlDelta -Id $control.Id)
+            if ($status.Supported -and -not $status.ManagedByPolicy -and @($deltas | Where-Object { $_.NeedsChange }).Count -gt 0) {
+                $preflight = Get-ControlPreflight -Control $control
+            }
+            $requiresOverride = [bool]($preflight -and $preflight.Tripped -and $preflight.BlocksSafeSet)
+            $explicit = [bool]($ExplicitIds -contains $control.Id)
+            $skip = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
+                    elseif (-not $status.Supported) { $status.SupportReason }
+                    elseif ($requiresOverride) {
+                        if ($explicit -and -not $script:Unattended) { $preflight.Message + ' A typed override is required.' }
+                        else { $preflight.Message + ' Skipped for safety; use the interactive specific-control menu to confirm an override.' }
+                    }
+                    else { $null }
+            foreach ($row in $deltas) {
                 $plan += [pscustomobject]@{
                     ControlId = $row.ControlId
                     ControlName = $row.ControlName
@@ -64,10 +79,22 @@ function Get-ChangePlan {
                     Note = $row.Note
                     ManagedByPolicy = $status.ManagedByPolicy
                     Supported = $status.Supported
-                    SkipReason = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
-                                 elseif (-not $status.Supported) { $status.SupportReason }
-                                 else { $null }
+                    ExplicitlyRequested = $explicit
+                    Preflight = $preflight
+                    RequiresOverride = $requiresOverride
+                    SkipReason = $skip
                 }
+            }
+        }
+    }
+    # A dependent cannot be enabled when its required protection is blocked.
+    foreach ($row in $plan) {
+        if ($row.SkipReason) { continue }
+        foreach ($dep in (ConvertTo-Array (Get-Control -Id $row.ControlId).Requires)) {
+            $blockedDep = @($plan | Where-Object { $_.ControlId -eq $dep -and $_.SkipReason })
+            if ($blockedDep.Count -gt 0) {
+                $row.SkipReason = ('Required control {0} is blocked: {1}' -f $dep, $blockedDep[0].SkipReason)
+                break
             }
         }
     }
@@ -130,47 +157,38 @@ function Invoke-ControlApply {
     param(
         [Parameter(Mandatory = $true)][string[]]$Ids,
         [Parameter(Mandatory = $true)]$State,
-        [string]$RunId
+        [string]$RunId,
+        [string[]]$ExplicitIds = @()
     )
 
     if (-not $script:RemediationAllowed) { throw 'Remediation is disabled because the self-integrity check failed.' }
     if (-not $RunId) { $RunId = [Guid]::NewGuid().ToString('N').Substring(0, 12) }
 
     $applied = @(); $skipped = @()
-    $plan = Get-ChangePlan -Ids $Ids -State $State
+    $plan = @(Get-ChangePlan -Ids $Ids -State $State -ExplicitIds $ExplicitIds)
 
-    # --- pre-flight safety checks -----------------------------------------
-    # A control can declare evidence that makes applying it risky right now. In the safe
-    # set a tripped check skips the control outright; a user who explicitly named that
-    # control may override it, but only by typing its id.
-    $blocked = @{}
-    foreach ($controlId in (@($plan | Select-Object -ExpandProperty ControlId -Unique))) {
-        $control = Get-Control -Id $controlId
-        $preflight = Get-ControlPreflight -Control $control
-        if (-not $preflight -or -not $preflight.Tripped) { continue }
-
-        Write-Line ''
-        Write-Line ('{0}: {1}' -f $control.Name, $preflight.Message) 'Warn'
-        foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
-            $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
-            $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
-            Write-Line ('{0} ({1}, {2})' -f $d.FileName, $who, $ver) 'Warn' 2
+    # Both preview and apply consume the same safety decision. Only a specifically
+    # selected control in an interactive session can override a tripped check.
+    foreach ($group in ($plan | Group-Object ControlId)) {
+        $row = @($group.Group)[0]
+        if (-not $row.RequiresOverride -or -not $row.ExplicitlyRequested -or $script:Unattended -or $WhatIfPreference) { continue }
+        Write-Line $row.Preflight.Message 'Warn'
+        if (Confirm-Action ('Enable {0} anyway?' -f $row.ControlName) -RequireTyped $row.ControlId) {
+            foreach ($value in $group.Group) { $value.SkipReason = $null }
         }
-
-        $explicitlyRequested = [bool](@($Ids) -contains $controlId)
-        if (-not $explicitlyRequested) {
-            $blocked[$controlId] = 'Skipped for safety: recent driver-compatibility warnings.'
-            Write-Line 'Skipping it. Ask for it by name to override.' 'Info' 2
-            continue
-        }
-        if (-not (Confirm-Action ('Enable {0} anyway?' -f $control.Name) -RequireTyped $controlId)) {
-            $blocked[$controlId] = 'Cancelled: driver-compatibility warnings were not overridden.'
-            Write-Line 'Cancelled.' 'Info' 2
-        }
+    }
+    # Rebuild dependency decisions after a genuine override without repeating queries.
+    foreach ($row in $plan) {
+        if ($row.SkipReason -notlike 'Required control *') { continue }
+        $blockedDeps = @((Get-Control -Id $row.ControlId).Requires | Where-Object {
+            $depId = $_
+            @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason }).Count -gt 0
+        })
+        if ($blockedDeps.Count -eq 0) { $row.SkipReason = $null }
     }
 
     # --- confirmation -----------------------------------------------------
-    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason -and -not $blocked.ContainsKey($_.ControlId) })
+    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason })
     if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
         Write-Section 'About to change'
         foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
@@ -188,12 +206,6 @@ function Invoke-ControlApply {
     }
 
     foreach ($row in $plan) {
-        if ($blocked.ContainsKey($row.ControlId)) {
-            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
-                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $blocked[$row.ControlId] }
-            }
-            continue
-        }
         if ($row.SkipReason) {
             if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
                 $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
