@@ -2,8 +2,8 @@
 # Plan, apply and revert.
 #
 # The plan is a projection of the catalog, so -WhatIf cannot disagree with what apply
-# actually writes. Every change is journalled BEFORE the registry is touched, which is
-# what makes rollback possible even after an interrupted run. v1 had no rollback at all.
+# actually writes. Intent is flushed before writing; completion/revert markers distinguish
+# confirmed changes from ambiguous interrupted writes and prevent stale replay.
 # ---------------------------------------------------------------------------
 
 function Get-ControlDelta {
@@ -284,108 +284,108 @@ function Invoke-ControlApply {
     $lock = $null
     if (-not $WhatIfPreference) { $lock = Enter-JournalLock }
     try {
-    $applied = @(); $skipped = @()
-    $plan = @(Get-ChangePlan -Ids $Ids -State $State -ExplicitIds $ExplicitIds)
+        $applied = @(); $skipped = @()
+        $plan = @(Get-ChangePlan -Ids $Ids -State $State -ExplicitIds $ExplicitIds)
 
-    # Both preview and apply consume the same safety decision. Only a specifically
-    # selected control in an interactive session can override a tripped check.
-    foreach ($group in ($plan | Group-Object ControlId)) {
-        $row = @($group.Group)[0]
-        if (-not $row.RequiresOverride -or -not $row.ExplicitlyRequested -or $script:Unattended -or $WhatIfPreference) { continue }
-        Write-Line $row.Preflight.Message 'Warn'
-        if (Confirm-Action ('Enable {0} anyway?' -f $row.ControlName) -RequireTyped $row.ControlId) {
-            foreach ($value in $group.Group) { $value.SkipReason = $null }
-        }
-    }
-    # Rebuild dependency decisions after a genuine override without repeating queries.
-    foreach ($row in $plan) {
-        if ($row.SkipReason -notlike 'Required control *') { continue }
-        $blockedDeps = @((Get-Control -Id $row.ControlId).Requires | Where-Object {
-            $depId = $_
-            @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason }).Count -gt 0
-        })
-        if ($blockedDeps.Count -eq 0) { $row.SkipReason = $null }
-    }
-
-    # --- confirmation -----------------------------------------------------
-    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason })
-    if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
-        Write-Section 'About to change'
-        foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
-            $control = Get-Control -Id $controlId
-            Write-Line $control.Name 'Info' 2
-            $caution = Get-PropertySafe $control 'Caution' $null
-            if ($caution) { Write-Line $caution 'Warn' 5 }
-        }
-        Write-Line ''
-        Write-Line ('{0} registry value(s) will change. A restart will be needed.' -f @($pending).Count) 'Plain'
-        if (-not (Confirm-Action 'Continue?' -DefaultYes)) {
-            Write-Line 'Cancelled. Nothing was changed.' 'Info'
-            return [pscustomobject]@{ RunId = $RunId; Applied = @(); Skipped = @(); ChangeCount = 0; RestartRequired = $false; Cancelled = $true }
-        }
-    }
-
-    foreach ($row in $plan) {
-        if ($row.SkipReason) {
-            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
-                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
+        # Both preview and apply consume the same safety decision. Only a specifically
+        # selected control in an interactive session can override a tripped check.
+        foreach ($group in ($plan | Group-Object ControlId)) {
+            $row = @($group.Group)[0]
+            if (-not $row.RequiresOverride -or -not $row.ExplicitlyRequested -or $script:Unattended -or $WhatIfPreference) { continue }
+            Write-Line $row.Preflight.Message 'Warn'
+            if (Confirm-Action ('Enable {0} anyway?' -f $row.ControlName) -RequireTyped $row.ControlId) {
+                foreach ($value in $group.Group) { $value.SkipReason = $null }
             }
-            continue
         }
-        if (-not $row.NeedsChange) { continue }
+        # Rebuild dependency decisions after a genuine override without repeating queries.
+        foreach ($row in $plan) {
+            if ($row.SkipReason -notlike 'Required control *') { continue }
+            $blockedDeps = @((Get-Control -Id $row.ControlId).Requires | Where-Object {
+                $depId = $_
+                @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason }).Count -gt 0
+            })
+            if ($blockedDeps.Count -eq 0) { $row.SkipReason = $null }
+        }
 
-        $target = '{0}\{1}' -f $row.Path, $row.Name
-        if (-not $PSCmdlet.ShouldProcess($target, ('Set {0} to {1}' -f $row.Type, $row.DesiredValue))) { continue }
+        # --- confirmation -----------------------------------------------------
+        $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason })
+        if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
+            Write-Section 'About to change'
+            foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
+                $control = Get-Control -Id $controlId
+                Write-Line $control.Name 'Info' 2
+                $caution = Get-PropertySafe $control 'Caution' $null
+                if ($caution) { Write-Line $caution 'Warn' 5 }
+            }
+            Write-Line ''
+            Write-Line ('{0} registry value(s) will change. A restart will be needed.' -f @($pending).Count) 'Plain'
+            if (-not (Confirm-Action 'Continue?' -DefaultYes)) {
+                Write-Line 'Cancelled. Nothing was changed.' 'Info'
+                return [pscustomobject]@{ RunId = $RunId; Applied = @(); Skipped = @(); ChangeCount = 0; RestartRequired = $false; Cancelled = $true }
+            }
+        }
 
-        # Check again under the run lock: another administrator can change state
-        # after planning even though other WinDSH processes are serialized.
-        $existsNow = Test-RegValue -Path $row.Path -Name $row.Name
-        $currentNow = if ($existsNow) { Get-RegValue -Path $row.Path -Name $row.Name } else { $null }
-        $kindNow = if ($existsNow) { Get-RegKind -Path $row.Path -Name $row.Name } else { $null }
-        if ($existsNow -ne $row.CurrentExists -or $currentNow -ne $row.CurrentValue -or $kindNow -ne $row.CurrentType) { throw 'Registry state changed since planning. Run the audit again.' }
-        if ($existsNow -and $kindNow -ne 'DWord') { throw 'The existing registry value is not a DWORD. Review it manually before remediation.' }
-        $changeId = [Guid]::NewGuid().ToString('N')
-        Write-JournalEntry ([pscustomobject]@{
-            RecordType = 'Change'
-            ChangeId = $changeId
+        foreach ($row in $plan) {
+            if ($row.SkipReason) {
+                if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
+                    $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
+                }
+                continue
+            }
+            if (-not $row.NeedsChange) { continue }
+
+            $target = '{0}\{1}' -f $row.Path, $row.Name
+            if (-not $PSCmdlet.ShouldProcess($target, ('Set {0} to {1}' -f $row.Type, $row.DesiredValue))) { continue }
+
+            # Check again under the run lock: another administrator can change state
+            # after planning even though other WinDSH processes are serialized.
+            $existsNow = Test-RegValue -Path $row.Path -Name $row.Name
+            $currentNow = if ($existsNow) { Get-RegValue -Path $row.Path -Name $row.Name } else { $null }
+            $kindNow = if ($existsNow) { Get-RegKind -Path $row.Path -Name $row.Name } else { $null }
+            if ($existsNow -ne $row.CurrentExists -or $currentNow -ne $row.CurrentValue -or $kindNow -ne $row.CurrentType) { throw 'Registry state changed since planning. Run the audit again.' }
+            if ($existsNow -and $kindNow -ne 'DWord') { throw 'The existing registry value is not a DWORD. Review it manually before remediation.' }
+            $changeId = [Guid]::NewGuid().ToString('N')
+            Write-JournalEntry ([pscustomobject]@{
+                RecordType = 'Change'
+                ChangeId = $changeId
+                RunId = $RunId
+                Time = (Get-Date).ToUniversalTime().ToString('o')
+                ToolVersion = $script:ToolVersion
+                ControlId = $row.ControlId
+                Path = $row.Path
+                Name = $row.Name
+                Type = $row.Type
+                BeforeType = $row.CurrentType
+                BeforeExists = $row.CurrentExists
+                BeforeValue = $row.CurrentValue
+                AfterValue = $row.DesiredValue
+            })
+            & $script:Registry.SetValue $row.Path $row.Name $row.Type $row.DesiredValue
+            $script:RestartRequired = $true
+
+            $applied += [pscustomobject]@{
+                ControlId = $row.ControlId
+                ControlName = $row.ControlName
+                Path = $row.Path
+                Name = $row.Name
+                Before = if ($row.CurrentExists) { $row.CurrentValue } else { '(not set)' }
+                After = $row.DesiredValue
+            }
+            $script:AppliedChanges += $applied[-1]
+            Write-JournalMarker -RunId $RunId -RecordType 'Applied' -ChangeId $changeId
+        }
+
+        if ($applied.Count -gt 0) { $script:RestartRequired = $true }
+        if ($applied.Count -gt 0) { Write-JournalMarker -RunId $RunId -RecordType 'RunCompleted' }
+
+        return [pscustomobject]@{
             RunId = $RunId
-            Time = (Get-Date).ToUniversalTime().ToString('o')
-            ToolVersion = $script:ToolVersion
-            ControlId = $row.ControlId
-            Path = $row.Path
-            Name = $row.Name
-            Type = $row.Type
-            BeforeType = $row.CurrentType
-            BeforeExists = $row.CurrentExists
-            BeforeValue = $row.CurrentValue
-            AfterValue = $row.DesiredValue
-        })
-        & $script:Registry.SetValue $row.Path $row.Name $row.Type $row.DesiredValue
-        $script:RestartRequired = $true
-
-        $applied += [pscustomobject]@{
-            ControlId = $row.ControlId
-            ControlName = $row.ControlName
-            Path = $row.Path
-            Name = $row.Name
-            Before = if ($row.CurrentExists) { $row.CurrentValue } else { '(not set)' }
-            After = $row.DesiredValue
+            Applied = $applied
+            Skipped = $skipped
+            ChangeCount = $applied.Count
+            RestartRequired = [bool]($applied.Count -gt 0)
+            Cancelled = $false
         }
-        $script:AppliedChanges += $applied[-1]
-        Write-JournalMarker -RunId $RunId -RecordType 'Applied' -ChangeId $changeId
-    }
-
-    if ($applied.Count -gt 0) { $script:RestartRequired = $true }
-    if ($applied.Count -gt 0) { Write-JournalMarker -RunId $RunId -RecordType 'RunCompleted' }
-
-    return [pscustomobject]@{
-        RunId = $RunId
-        Applied = $applied
-        Skipped = $skipped
-        ChangeCount = $applied.Count
-        RestartRequired = [bool]($applied.Count -gt 0)
-        Cancelled = $false
-    }
     }
     finally { if ($lock) { $lock.Dispose() } }
 }
