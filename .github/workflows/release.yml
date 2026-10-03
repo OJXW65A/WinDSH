@@ -1,8 +1,8 @@
 name: WinDSH Release
 
 # Releases are produced ONLY by this workflow, from this repository's source.
-# SignPath Foundation requires that signed artifacts are built by a trusted build
-# system from the project's own source. Never hand-upload a release asset.
+# Build provenance and checksums refer to the workflow's exact source and payload.
+# Never hand-upload a release asset or replace a published artifact.
 #
 # To cut a release:
 #   1. Make sure main is green and the version in WinDSH.ps1 is correct.
@@ -26,7 +26,7 @@ permissions:
   attestations: write   # write the provenance attestation
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -43,6 +43,9 @@ jobs:
         run: |
           $source = Get-Content -Raw .\WinDSH.ps1
           $scriptVersion = [regex]::Match($source, "ToolVersion\s*=\s*'([^']+)'").Groups[1].Value
+          if ($scriptVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$') {
+              throw 'ToolVersion must be a version suitable for a release tag.'
+          }
           Write-Host "Version in WinDSH.ps1: $scriptVersion"
 
           if ($env:GITHUB_REF -like 'refs/tags/*') {
@@ -92,6 +95,14 @@ jobs:
               exit 1
           }
 
+      - name: Refuse existing releases
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: .\build\Test-ReleaseTarget.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $env:RELEASE_TAG
+
       - name: Install Pester
         shell: powershell
         run: |
@@ -132,6 +143,7 @@ jobs:
               'CONTRIBUTING.md'
               'CLAUDE.md'
               'docs/USAGE.md'
+              'docs/REPORT_SCHEMA.md'
               'docs/RELEASING.md'
               'assets/bitcoin-qr.png'
           )
@@ -200,6 +212,14 @@ jobs:
           path: dist/
           retention-days: 30
 
+      - name: Recheck release target before uploading
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: .\build\Test-ReleaseTarget.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $env:RELEASE_TAG
+
       - name: Create release tag
         if: github.event_name == 'workflow_dispatch' && inputs.create_release
         shell: powershell
@@ -222,6 +242,8 @@ jobs:
           name: WinDSH ${{ steps.version.outputs.tag }}
           tag_name: ${{ steps.version.outputs.tag }}
           draft: true
+          overwrite_files: false
+          fail_on_unmatched_files: true
           generate_release_notes: true
           files: |
             dist/*.zip

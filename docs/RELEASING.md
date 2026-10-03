@@ -70,8 +70,16 @@ Do not hand-upload or replace release assets outside the workflow. If a release
 build is wrong, correct the source and cut a new version. The final signed payload,
 if signing is introduced, must be the payload that is checksummed and attested.
 
-After publication, verify the release download links and update README version
-status in a follow-up documentation change. Keep documentation for older releases
+Both tag and manual release routes check for existing releases before building
+and again before creating a draft. An existing published release or draft blocks
+uploads; API errors also block uploads. Asset overwrite is disabled. A failed run
+may be retried if it did not create a release. If it left a draft, review the draft
+and workflow artifacts manually before deciding whether to discard that unpublished
+draft or cut another version. Never discard or replace a published release's assets.
+
+After publication, verify the release download links and the packaged version on
+the release page. The README distinguishes the source version from the latest
+published download. Keep documentation for older releases
 available through their tags.
 
 ## Branches and repository settings
