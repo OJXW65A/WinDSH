@@ -155,6 +155,7 @@ $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
 $script:AppliedChanges     = @()
+$script:RevertedChanges    = @()
 $script:DebugEnabled       = $false
 $script:DebugPath          = $null
 $script:UseColor           = $true

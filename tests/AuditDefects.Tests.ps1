@@ -240,6 +240,111 @@ Describe 'Audit defect regressions' {
         $payload.controls.Count | Should -Be 11
         $script:Registry.Store.Count | Should -Be 0
     }
+
+    It 'reports the actual writes made by an unattended rollback' {
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 0
+        $run = Invoke-ControlApply -Ids @('driver-blocklist') -State $testState
+        $script:AppliedChanges = @(); $script:RestartRequired = $false
+        $Revert = $true; $RunId = $run.RunId; $Rmm = $true
+        $lines = @(Invoke-EntryPoint)
+        $lines.Count | Should -Be 1
+        $payload = $lines[0] | ConvertFrom-Json
+        $payload.exitCode | Should -Be 3010
+        $payload.changes | Should -Be 1
+        $payload.appliedChangeCount | Should -Be 0
+        $payload.revertedChangeCount | Should -Be 1
+        Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' | Should -Be 0
+        $script:RevertedChanges[0].RunId | Should -Be $run.RunId
+        $script:RevertedChanges[0].Before | Should -Be 1
+        $script:RevertedChanges[0].RestoredTo | Should -Be 0
+
+        $NoReport = $false
+        $assessment = Get-Assessment $testState
+        $args = @{ State = $testState; Statuses = $assessment.Statuses; Score = $assessment.Score; SecuredCore = $assessment.SecuredCore; Cis = $assessment.Cis; Explanations = $assessment.Explanations }
+        $paths = @(Save-Reports @args -Formats @{ Html = $true; Text = $true; Json = $true })
+        $json = Get-Content -Raw ($paths | Where-Object { $_ -like '*.json' }) | ConvertFrom-Json
+        $json.RevertedChanges.Count | Should -Be 1
+        $json.RevertedChanges[0].RestoredTo | Should -Be 0
+        (Get-Content -Raw ($paths | Where-Object { $_ -like '*.txt' })) | Should -Match 'CHANGES REVERTED IN THIS SESSION'
+        (Get-Content -Raw ($paths | Where-Object { $_ -like '*.html' })) | Should -Match 'Changes reverted in this session'
+    }
+
+    It 'counts successful rollback writes even when another value conflicts' {
+        $run = Invoke-ControlApply -Ids @('vbs') -State $testState
+        & $script:Registry.SetValue $script:RegDeviceGuard 'Locked' 'DWord' 2
+        $script:AppliedChanges = @(); $script:RestartRequired = $false
+        $Revert = $true; $RunId = $run.RunId; $Rmm = $true
+        $payload = (Invoke-EntryPoint) | ConvertFrom-Json
+        $payload.exitCode | Should -Be 5
+        $payload.changes | Should -Be 1
+        $payload.revertedChangeCount | Should -Be 1
+        Get-RegValue $script:RegDeviceGuard 'Locked' | Should -Be 2
+    }
+
+    It 'does not count a rollback preview as a registry change' {
+        $run = Invoke-ControlApply -Ids @('driver-blocklist') -State $testState
+        $script:AppliedChanges = @(); $script:RestartRequired = $false
+        $Revert = $true; $RunId = $run.RunId; $Rmm = $true; $WhatIfPreference = $true
+        $payload = (Invoke-EntryPoint) | ConvertFrom-Json
+        $payload.changes | Should -Be 0
+        $payload.revertedChangeCount | Should -Be 0
+        Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' | Should -Be 1
+    }
+
+    It 'does not count recovery of a completed but unmarked rollback as another write' {
+        $run = Invoke-ControlApply -Ids @('driver-blocklist') -State $testState
+        $entry = @(Get-Journal -RunId $run.RunId | Where-Object RecordType -eq 'Change')[0]
+        Write-JournalMarker -RunId $run.RunId -RecordType 'RevertStarted' -ChangeId $entry.ChangeId
+        & $script:Registry.RemoveValue $entry.Path $entry.Name
+        $script:AppliedChanges = @(); $script:RestartRequired = $false
+        $result = Invoke-ControlRevert -RunId $run.RunId
+        $result.RecoveredCount | Should -Be 1
+        $result.ChangeCount | Should -Be 0
+        $script:RevertedChanges.Count | Should -Be 0
+    }
+
+    It 'preserves each report when two assessments are saved in the same second' {
+        Mock Get-Date { [datetime]'2026-10-03T12:00:00' }
+        $NoReport = $false
+        $assessment = Get-Assessment $testState
+        $args = @{ State = $testState; Statuses = $assessment.Statuses; Score = $assessment.Score; SecuredCore = $assessment.SecuredCore; Cis = $assessment.Cis; Explanations = $assessment.Explanations }
+        $first = @(Save-Reports @args -Formats @{ Html = $true; Text = $true; Json = $true })
+        $snapshot = @{}
+        foreach ($path in $first) { $snapshot[$path] = [IO.File]::ReadAllText($path) }
+        $testState.Computer.Model = 'Second assessment'
+        $second = @(Save-Reports @args -Formats @{ Html = $true; Text = $true; Json = $true })
+        @($first + $second | Select-Object -Unique).Count | Should -Be 6
+        foreach ($path in $first) { [IO.File]::ReadAllText($path) | Should -BeExactly $snapshot[$path] }
+        $json = Get-Content -Raw ($second | Where-Object { $_ -like '*.json' }) | ConvertFrom-Json
+        $json.Computer.Model | Should -Be 'Second assessment'
+    }
+
+    It 'refuses to replace an existing report even with an explicitly colliding path' {
+        $path = Join-Path $TestDrive 'existing-report.txt'
+        [IO.File]::WriteAllText($path, 'Original report')
+        { Write-ReportFile -Path $path -Content 'Replacement' } | Should -Throw
+        [IO.File]::ReadAllText($path) | Should -BeExactly 'Original report'
+    }
+
+    It 'renders valid fractional SVG numbers with the <Culture> locale' -TestCases @(
+        @{ Culture = 'fr-FR' }, @{ Culture = 'de-DE' }, @{ Culture = 'en-US' }
+    ) {
+        param($Culture)
+        $previous = [Globalization.CultureInfo]::CurrentCulture
+        try {
+            [Globalization.CultureInfo]::CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo($Culture)
+            & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+            $assessment = Get-Assessment $testState
+            $assessment.Score.Score | Should -BeGreaterThan 0
+            $assessment.Score.Score | Should -BeLessThan 100
+            $html = New-HtmlReport -State $testState -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
+            $dash = [regex]::Match($html, 'stroke-dasharray="([0-9]+\.[0-9]+) ([0-9]+\.[0-9]+)"')
+            $dash.Success | Should -BeTrue
+            $sum = [double]::Parse($dash.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) + [double]::Parse($dash.Groups[2].Value, [Globalization.CultureInfo]::InvariantCulture)
+            [math]::Abs($sum - 439.82) | Should -BeLessThan 0.01
+        }
+        finally { [Globalization.CultureInfo]::CurrentCulture = $previous }
+    }
 }
 
 Describe 'Self-integrity metadata validation' {

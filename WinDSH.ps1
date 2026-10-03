@@ -149,11 +149,12 @@ $script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = 'f6cdd542be9188585d9b543c06628cd371a30506b2b0eb72c1978c33bd4cac81'
+$script:ExpectedIntegrityHash = '6af30561cc02ec32e0bb56f8d836c8f2e1423eb5e2a997fb3be209e4e3f73239'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
 $script:AppliedChanges     = @()
+$script:RevertedChanges    = @()
 $script:DebugEnabled       = $false
 $script:DebugPath          = $null
 $script:UseColor           = $true
@@ -2809,9 +2810,11 @@ function Invoke-ControlRevert {
             if ($entry.BeforeExists) { & $script:Registry.SetValue $entry.Path $entry.Name $beforeType $entry.BeforeValue }
             else { & $script:Registry.RemoveValue $entry.Path $entry.Name }
             $script:RestartRequired = $true
-            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
             $restored = if ($entry.BeforeExists) { $entry.BeforeValue } else { '(removed)' }
-            $reverted += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; RestoredTo = $restored }
+            $operation = [pscustomobject]@{ RunId = $RunId; ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; Before = $current; RestoredTo = $restored }
+            $script:RevertedChanges += $operation
+            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
+            $reverted += $operation
         }
         if (-not $WhatIfPreference -and $conflicts.Count -eq 0 -and $reverted.Count + $recovered -eq $changes.Count) {
             Write-JournalMarker -RunId $RunId -RecordType 'RevertCompleted'
@@ -2948,6 +2951,11 @@ function New-TextReport {
         $lines += ''
     }
 
+    if (@($script:RevertedChanges).Count -gt 0) {
+        $lines += 'CHANGES REVERTED IN THIS SESSION'
+        foreach ($change in $script:RevertedChanges) { $lines += ('  {0}\{1}: {2} -> {3}' -f $change.Path, $change.Name, $change.Before, $change.RestoredTo) }
+        $lines += ''
+    }
     $lines += $rule
     $lines += 'This report describes configuration state only. It is not a vulnerability assessment.'
     $lines += 'WinDSH writes local machine settings and never modifies Group Policy.'
@@ -3063,7 +3071,9 @@ a{color:inherit}
     $null = $sb.AppendLine('<div class="card hero">')
     $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Applicable protection score">')
     $null = $sb.AppendLine('<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>')
-    $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filled, $gap))
+    $filledText = $filled.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture)
+    $gapText = $gap.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture)
+    $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filledText, $gapText))
     $null = $sb.AppendLine(('<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">{0}</text>' -f $Score.Score))
     $null = $sb.AppendLine('<text x="90" y="108" text-anchor="middle" font-size="13" fill="currentColor" opacity="0.65">out of 100</text>')
     $null = $sb.AppendLine('</svg>')
@@ -3137,6 +3147,15 @@ a{color:inherit}
         }
     }
     $null = $sb.AppendLine('</div>')
+
+    if (@($script:RevertedChanges).Count -gt 0) {
+        $null = $sb.AppendLine('<h2>Changes reverted in this session</h2><div class="card"><ul>')
+        foreach ($change in $script:RevertedChanges) {
+            $description = '{0}\{1}: {2} -> {3}' -f $change.Path, $change.Name, $change.Before, $change.RestoredTo
+            $null = $sb.AppendLine(('<li>{0}</li>' -f (ConvertTo-HtmlText $description)))
+        }
+        $null = $sb.AppendLine('</ul></div>')
+    }
 
     # ---- CIS ----
     $null = $sb.AppendLine(('<h2>CIS Benchmark comparison</h2>'))
@@ -3767,21 +3786,20 @@ function Save-Reports {
     if (-not (Test-Path -LiteralPath $folder)) {
         New-Item -ItemType Directory -Path $folder -Force -WhatIf:$false | Out-Null
     }
-    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-    $base = Join-Path $folder ('WinDSH-{0}-{1}' -f $State.Computer.Name, $stamp)
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+    $base = Join-Path $folder ('WinDSH-{0}-{1}-{2}' -f $State.Computer.Name, $stamp, [Guid]::NewGuid().ToString('N'))
     $written = @()
-    $encoding = New-Object Text.UTF8Encoding($false)
 
     if ($wantText) {
         $text = New-TextReport -State $State -Statuses $Statuses -Score $Score -SecuredCore $SecuredCore -Cis $Cis -Explanations $Explanations
         $path = $base + '.txt'
-        [IO.File]::WriteAllText($path, $text, $encoding)
+        Write-ReportFile -Path $path -Content $text
         $written += $path
     }
     if ($wantHtml) {
         $html = New-HtmlReport -State $State -Statuses $Statuses -Score $Score -SecuredCore $SecuredCore -Cis $Cis -Explanations $Explanations
         $path = $base + '.html'
-        [IO.File]::WriteAllText($path, $html, $encoding)
+        Write-ReportFile -Path $path -Content $html
         $written += $path
     }
     if ($wantJson) {
@@ -3792,6 +3810,8 @@ function Save-Reports {
             Computer = $State.Computer
             Firmware = $State.Firmware
             Tpm = $State.Tpm
+            DeviceGuard = $State.DeviceGuard
+            Policy = $State.Policy
             HypervisorLaunch = $State.HypervisorLaunch
             Restart = $State.Restart
             Score = $Score
@@ -3799,13 +3819,27 @@ function Save-Reports {
             Controls = $Statuses
             Cis = $Cis
             AppliedChanges = $script:AppliedChanges
+            RevertedChanges = $script:RevertedChanges
             Warnings = $script:Warnings
         }
         $path = $base + '.json'
-        [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 12), $encoding)
+        Write-ReportFile -Path $path -Content ($payload | ConvertTo-Json -Depth 12)
         $written += $path
     }
     return $written
+}
+
+function Write-ReportFile {
+    param([string]$Path, [string]$Content)
+    # Exclusive creation guarantees an earlier report is never replaced, even if a
+    # caller supplies a colliding name. Report files remain available during preview.
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $bytes = $encoding.GetBytes($Content)
+        $stream.Write($bytes, 0, $bytes.Length)
+    }
+    finally { $stream.Dispose() }
 }
 
 function Write-RmmOutput {
@@ -3818,6 +3852,8 @@ function Write-RmmOutput {
         generated = $State.Generated
         score = $Score.Score
         grade = $Score.Grade
+        unknownControls = @($Statuses | Where-Object State -eq 'Unknown').Count
+        unknownCisChecks = $Cis.UnknownCount
         restartRequired = $script:RestartRequired
         hypervisorBlocksVbs = $State.HypervisorLaunch.BlocksVbs
         firmwareMode = $State.Firmware.Mode
@@ -3825,8 +3861,10 @@ function Write-RmmOutput {
         tpm2 = $State.Tpm.IsTPM2
         cisCompliant = $Cis.CompliantCount
         cisTotal = $Cis.TotalCount
-        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy } })
-        changes = @($script:AppliedChanges).Count
+        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy; policyKnown = (-not [bool]$_.PolicyReadError); runningKnown = $_.RunningKnown } })
+        changes = @($script:AppliedChanges).Count + @($script:RevertedChanges).Count
+        appliedChangeCount = @($script:AppliedChanges).Count
+        revertedChangeCount = @($script:RevertedChanges).Count
         warnings = @($script:Warnings).Count
         exitCode = $script:ExitCode
     }

@@ -120,6 +120,11 @@ function New-TextReport {
         $lines += ''
     }
 
+    if (@($script:RevertedChanges).Count -gt 0) {
+        $lines += 'CHANGES REVERTED IN THIS SESSION'
+        foreach ($change in $script:RevertedChanges) { $lines += ('  {0}\{1}: {2} -> {3}' -f $change.Path, $change.Name, $change.Before, $change.RestoredTo) }
+        $lines += ''
+    }
     $lines += $rule
     $lines += 'This report describes configuration state only. It is not a vulnerability assessment.'
     $lines += 'WinDSH writes local machine settings and never modifies Group Policy.'

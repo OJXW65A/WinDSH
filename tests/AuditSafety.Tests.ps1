@@ -20,6 +20,7 @@ Describe 'Safety decisions and consistent projections' {
         $script:Unattended = $true
         $script:RestartRequired = $false
         $script:AppliedChanges = @()
+        $script:RevertedChanges = @()
         $script:Warnings = @()
         $script:ExitCode = 0
         $script:UseColor = $false

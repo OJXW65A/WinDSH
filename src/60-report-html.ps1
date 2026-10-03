@@ -104,7 +104,9 @@ a{color:inherit}
     $null = $sb.AppendLine('<div class="card hero">')
     $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Applicable protection score">')
     $null = $sb.AppendLine('<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>')
-    $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filled, $gap))
+    $filledText = $filled.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture)
+    $gapText = $gap.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture)
+    $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filledText, $gapText))
     $null = $sb.AppendLine(('<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">{0}</text>' -f $Score.Score))
     $null = $sb.AppendLine('<text x="90" y="108" text-anchor="middle" font-size="13" fill="currentColor" opacity="0.65">out of 100</text>')
     $null = $sb.AppendLine('</svg>')
@@ -178,6 +180,15 @@ a{color:inherit}
         }
     }
     $null = $sb.AppendLine('</div>')
+
+    if (@($script:RevertedChanges).Count -gt 0) {
+        $null = $sb.AppendLine('<h2>Changes reverted in this session</h2><div class="card"><ul>')
+        foreach ($change in $script:RevertedChanges) {
+            $description = '{0}\{1}: {2} -> {3}' -f $change.Path, $change.Name, $change.Before, $change.RestoredTo
+            $null = $sb.AppendLine(('<li>{0}</li>' -f (ConvertTo-HtmlText $description)))
+        }
+        $null = $sb.AppendLine('</ul></div>')
+    }
 
     # ---- CIS ----
     $null = $sb.AppendLine(('<h2>CIS Benchmark comparison</h2>'))

@@ -455,9 +455,11 @@ function Invoke-ControlRevert {
             if ($entry.BeforeExists) { & $script:Registry.SetValue $entry.Path $entry.Name $beforeType $entry.BeforeValue }
             else { & $script:Registry.RemoveValue $entry.Path $entry.Name }
             $script:RestartRequired = $true
-            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
             $restored = if ($entry.BeforeExists) { $entry.BeforeValue } else { '(removed)' }
-            $reverted += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; RestoredTo = $restored }
+            $operation = [pscustomobject]@{ RunId = $RunId; ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; Before = $current; RestoredTo = $restored }
+            $script:RevertedChanges += $operation
+            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
+            $reverted += $operation
         }
         if (-not $WhatIfPreference -and $conflicts.Count -eq 0 -and $reverted.Count + $recovered -eq $changes.Count) {
             Write-JournalMarker -RunId $RunId -RecordType 'RevertCompleted'
