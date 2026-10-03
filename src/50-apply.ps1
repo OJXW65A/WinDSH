@@ -12,14 +12,18 @@ function Get-ControlDelta {
     $control = Get-Control -Id $Id
     $rows = @()
     foreach ($value in (ConvertTo-Array $control.LocalValues)) {
-        $exists = Test-RegValue -Path $value.Path -Name $value.Name
-        $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
+        $exists = $false; $current = $null; $currentType = $null; $readError = $null
+        try {
+            $exists = Test-RegValue -Path $value.Path -Name $value.Name
+            $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
+            $currentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
+        }
+        catch { $readError = $_.Exception.Message }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        $currentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
-
-        $needs = if (-not $exists -or $currentType -ne $value.Type) { $true }
-                 elseif ($comparison -eq 'AtLeast') { [long]$current -lt [long]$value.Value }
-                 else { [long]$current -ne [long]$value.Value }
+        $invalid = [bool]($exists -and $currentType -eq $value.Type -and $value.ContainsKey('KnownValues') -and @($value.KnownValues) -notcontains [long]$current)
+        $needs = if ($readError) { $false }
+                 elseif (-not $exists -or $currentType -ne $value.Type) { $true }
+                 else { -not (Test-CatalogValueSatisfied -Definition $value -Current $current) }
 
         $rows += [pscustomobject]@{
             ControlId = $control.Id
@@ -33,6 +37,8 @@ function Get-ControlDelta {
             CurrentType = $currentType
             DesiredValue = $value.Value
             NeedsChange = [bool]$needs
+            ReadError = $readError
+            InvalidValue = $invalid
             Note = $value.Note
         }
     }
@@ -60,7 +66,10 @@ function Get-ChangePlan {
             }
             $requiresOverride = [bool]($preflight -and $preflight.Tripped -and $preflight.BlocksSafeSet)
             $explicit = [bool]($ExplicitIds -contains $control.Id)
-            $skip = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
+            $skip = if ($status.PolicyReadError) { 'Cannot verify organization policy; restore read access before remediation.' }
+                    elseif (@($deltas | Where-Object ReadError).Count -gt 0) { 'Cannot read the existing registry state; remediation is blocked to preserve rollback data.' }
+                    elseif (@($deltas | Where-Object InvalidValue).Count -gt 0) { 'An existing registry value is unrecognized. Review it manually before remediation.' }
+                    elseif ($status.ManagedByPolicy) { 'Managed by Group Policy' }
                     elseif (-not $status.Supported) { $status.SupportReason }
                     elseif (@($deltas | Where-Object { $_.CurrentExists -and $_.CurrentType -ne $_.Type }).Count -gt 0) { 'An existing registry value has an unexpected type. Review it manually before remediation.' }
                     elseif ($requiresOverride) {
@@ -86,7 +95,7 @@ function Get-ChangePlan {
                     ExplicitlyRequested = $explicit
                     Preflight = $preflight
                     RequiresOverride = $requiresOverride
-                    DependencyReady = [bool]($status.Supported -and $status.Running -and (-not $status.ManagedByPolicy -or $status.PolicyValue -ne 0))
+                    DependencyReady = [bool]($status.Supported -and $status.Running -and -not $status.PolicyReadError -and -not $status.ConfigurationError -and (-not $status.ManagedByPolicy -or $status.PolicyValue -ne 0))
                     SkipReason = $skip
                 }
             }
@@ -446,9 +455,11 @@ function Invoke-ControlRevert {
             if ($entry.BeforeExists) { & $script:Registry.SetValue $entry.Path $entry.Name $beforeType $entry.BeforeValue }
             else { & $script:Registry.RemoveValue $entry.Path $entry.Name }
             $script:RestartRequired = $true
-            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
             $restored = if ($entry.BeforeExists) { $entry.BeforeValue } else { '(removed)' }
-            $reverted += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; RestoredTo = $restored }
+            $operation = [pscustomobject]@{ RunId = $RunId; ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; Before = $current; RestoredTo = $restored }
+            $script:RevertedChanges += $operation
+            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
+            $reverted += $operation
         }
         if (-not $WhatIfPreference -and $conflicts.Count -eq 0 -and $reverted.Count + $recovered -eq $changes.Count) {
             Write-JournalMarker -RunId $RunId -RecordType 'RevertCompleted'

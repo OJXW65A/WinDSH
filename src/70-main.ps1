@@ -7,12 +7,13 @@ function Show-Summary {
     param($State, $Statuses, $Score, $SecuredCore)
 
     Write-Section 'Applicable protection score'
-    $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
+    $kind = if ($Score.UnknownCount -gt 0) { 'Warn' } elseif ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
     Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
+    if ($Score.UnknownCount -gt 0) { Write-Line ('{0} scored protection(s) could not be verified; they earn no points and remain in the total.' -f $Score.UnknownCount) 'Warn' }
     if ($Score.ExcludedCount -gt 0) {
         Write-Line ('{0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
     }
@@ -81,8 +82,8 @@ function Show-CisSummary {
     }
     Write-Line $Cis.Note 'Dim'
     foreach ($r in $Cis.Rows) {
-        $kind = if ($r.Compliant) { 'Good' } else { 'Bad' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $kind = if (-not $r.PolicyKnown) { 'Warn' } elseif ($r.Compliant) { 'Good' } else { 'Bad' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         Write-Line ('{0,-9} {1,-38} policy value = {2}' -f $r.CisId, $r.PolicyValueName, $actual) $kind 2
     }
 }
@@ -129,21 +130,20 @@ function Save-Reports {
     if (-not (Test-Path -LiteralPath $folder)) {
         New-Item -ItemType Directory -Path $folder -Force -WhatIf:$false | Out-Null
     }
-    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-    $base = Join-Path $folder ('WinDSH-{0}-{1}' -f $State.Computer.Name, $stamp)
+    $stamp = (Get-Date).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+    $base = Join-Path $folder ('WinDSH-{0}-{1}-{2}' -f $State.Computer.Name, $stamp, [Guid]::NewGuid().ToString('N'))
     $written = @()
-    $encoding = New-Object Text.UTF8Encoding($false)
 
     if ($wantText) {
         $text = New-TextReport -State $State -Statuses $Statuses -Score $Score -SecuredCore $SecuredCore -Cis $Cis -Explanations $Explanations
         $path = $base + '.txt'
-        [IO.File]::WriteAllText($path, $text, $encoding)
+        Write-ReportFile -Path $path -Content $text
         $written += $path
     }
     if ($wantHtml) {
         $html = New-HtmlReport -State $State -Statuses $Statuses -Score $Score -SecuredCore $SecuredCore -Cis $Cis -Explanations $Explanations
         $path = $base + '.html'
-        [IO.File]::WriteAllText($path, $html, $encoding)
+        Write-ReportFile -Path $path -Content $html
         $written += $path
     }
     if ($wantJson) {
@@ -154,6 +154,8 @@ function Save-Reports {
             Computer = $State.Computer
             Firmware = $State.Firmware
             Tpm = $State.Tpm
+            DeviceGuard = $State.DeviceGuard
+            Policy = $State.Policy
             HypervisorLaunch = $State.HypervisorLaunch
             Restart = $State.Restart
             Score = $Score
@@ -161,13 +163,27 @@ function Save-Reports {
             Controls = $Statuses
             Cis = $Cis
             AppliedChanges = $script:AppliedChanges
+            RevertedChanges = $script:RevertedChanges
             Warnings = $script:Warnings
         }
         $path = $base + '.json'
-        [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 12), $encoding)
+        Write-ReportFile -Path $path -Content ($payload | ConvertTo-Json -Depth 12)
         $written += $path
     }
     return $written
+}
+
+function Write-ReportFile {
+    param([string]$Path, [string]$Content)
+    # Exclusive creation guarantees an earlier report is never replaced, even if a
+    # caller supplies a colliding name. Report files remain available during preview.
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $bytes = $encoding.GetBytes($Content)
+        $stream.Write($bytes, 0, $bytes.Length)
+    }
+    finally { $stream.Dispose() }
 }
 
 function Write-RmmOutput {
@@ -180,6 +196,8 @@ function Write-RmmOutput {
         generated = $State.Generated
         score = $Score.Score
         grade = $Score.Grade
+        unknownControls = @($Statuses | Where-Object State -eq 'Unknown').Count
+        unknownCisChecks = $Cis.UnknownCount
         restartRequired = $script:RestartRequired
         hypervisorBlocksVbs = $State.HypervisorLaunch.BlocksVbs
         firmwareMode = $State.Firmware.Mode
@@ -187,8 +205,10 @@ function Write-RmmOutput {
         tpm2 = $State.Tpm.IsTPM2
         cisCompliant = $Cis.CompliantCount
         cisTotal = $Cis.TotalCount
-        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy } })
-        changes = @($script:AppliedChanges).Count
+        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy; policyKnown = (-not [bool]$_.PolicyReadError); runningKnown = $_.RunningKnown } })
+        changes = @($script:AppliedChanges).Count + @($script:RevertedChanges).Count
+        appliedChangeCount = @($script:AppliedChanges).Count
+        revertedChangeCount = @($script:RevertedChanges).Count
         warnings = @($script:Warnings).Count
         exitCode = $script:ExitCode
     }
@@ -316,7 +336,7 @@ function Invoke-Interactive {
 
         switch ($choice) {
             '1' {
-                $State = Get-SystemState -Volatile
+                $State = Get-SystemState
                 $assessment = Get-Assessment -State $State
                 Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
                 Show-NextSteps -Explanations $assessment.Explanations
@@ -441,7 +461,10 @@ function Invoke-Main {
         Write-Line 'Use one change mode at a time; -RunId requires -Revert and -Explain cannot be combined with changes.' 'Bad'
         $script:ExitCode = 1; return
     }
-    if ($Enable) { $Enable = @($Enable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    if ($Enable) {
+        $Enable = @(ConvertTo-ControlIds -Ids $Enable)
+        $script:InvocationParameters['Enable'] = $Enable
+    }
     foreach ($controlId in (ConvertTo-Array $Enable)) {
         if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
         if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
@@ -468,8 +491,8 @@ function Invoke-Main {
     }
 
     $integrity = Get-SelfIntegrity
-    if ($integrity.Status -eq 'Failed') {
-        Write-Line 'Self-integrity check FAILED: this file does not match its recorded hash.' 'Bad'
+    if ($integrity.Status -ne 'OK') {
+        Write-Line ('Self-integrity could not be verified ({0}).' -f $integrity.Status) 'Bad'
         Write-Line 'Auditing will continue, but making changes is disabled. Download a fresh copy.' 'Warn'
         $script:RemediationAllowed = $false
         $script:ExitCode = 3
@@ -487,7 +510,7 @@ function Invoke-Main {
             $script:ExitCode = 1; return
         }
         Show-Explanation (Get-ControlExplanation -Id $id -State $State)
-        $script:ExitCode = 0; return
+        return
     }
 
     $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Revert -or $Rmm)

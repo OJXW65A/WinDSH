@@ -9,7 +9,8 @@ comparison with CIS Device Guard policy settings.
 
 **Contact:** windsh@rootauthority.com
 
-**Version:** v2.0.0. The examples below describe this version; documentation for
+**Source version:** v2.0.1. The download below follows the latest published
+release; its packaged version is shown on the release page. Documentation for
 older releases is available from their matching tags.
 
 ## Download
@@ -57,6 +58,8 @@ driver blocklist, DEP, DMA/SMM capabilities, and pending restarts.
 
 The report includes an applicable protection score, Secured-core assessment, CIS
 comparison, and explanations of unsupported or inactive protections.
+Unavailable evidence is reported as **Unable to verify**, and shadow-stack audit
+mode is distinguished from enforcement. Neither receives active-protection credit.
 See the [control catalog and command reference](docs/USAGE.md).
 
 ## Safety and signing
@@ -79,6 +82,7 @@ Re-audit after restarting to confirm that configured protections are running.
 | Guide | Contents |
 |---|---|
 | [Usage](docs/USAGE.md) | Controls, command-line options, reports, scoring, rollback, exit codes |
+| [Report schema](docs/REPORT_SCHEMA.md) | JSON and RMM fields, status meanings, schema compatibility |
 | [Contributing](CONTRIBUTING.md) | Source layout, builds, tests, contribution rules |
 | [Release process](docs/RELEASING.md) | Release validation, packaging, publication, repository maintenance |
 | [Security policy](SECURITY.md) | Supported versions and private vulnerability reporting |

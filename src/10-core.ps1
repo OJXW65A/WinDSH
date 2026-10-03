@@ -144,8 +144,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
-$script:ToolVersion     = '2.0.0'
-$script:SchemaVersion   = '2.0'
+$script:ToolVersion     = '2.0.1'
+$script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
@@ -155,6 +155,7 @@ $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
 $script:AppliedChanges     = @()
+$script:RevertedChanges    = @()
 $script:DebugEnabled       = $false
 $script:DebugPath          = $null
 $script:UseColor           = $true
@@ -214,6 +215,7 @@ function Write-Section {
 
 function Add-Warning {
     param([string]$Message)
+    if ($script:Warnings -contains $Message) { return }
     $script:Warnings += $Message
     Write-Debug-Log ('WARNING: {0}' -f $Message)
 }
@@ -288,21 +290,16 @@ function New-RegistryProvider {
         Kind = 'Windows'
         GetValue = {
             param([string]$Path, [string]$Name)
-            try {
-                if (-not (Test-Path -LiteralPath $Path)) { return $null }
-                $item = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
-                return $item.$Name
-            }
-            catch { return $null }
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $null }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            if (@($key.GetValueNames()) -notcontains $Name) { return $null }
+            return $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         }
         ValueExists = {
             param([string]$Path, [string]$Name)
-            try {
-                if (-not (Test-Path -LiteralPath $Path)) { return $false }
-                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-                return [bool](@($key.GetValueNames()) -contains $Name)
-            }
-            catch { return $false }
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $false }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return [bool](@($key.GetValueNames()) -contains $Name)
         }
         GetKind = {
             param([string]$Path, [string]$Name)
@@ -367,6 +364,14 @@ function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
 function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
+
+function Test-CatalogValueSatisfied {
+    param([hashtable]$Definition, $Current)
+    if ($null -eq $Current) { return $false }
+    if ($Definition.ContainsKey('AcceptedValues')) { return [bool](@($Definition.AcceptedValues) -contains [long]$Current) }
+    if ($Definition.ContainsKey('Comparison') -and $Definition.Comparison -eq 'AtLeast') { return [bool]([long]$Current -ge [long]$Definition.Value) }
+    return [bool]([long]$Current -eq [long]$Definition.Value)
+}
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -452,20 +457,19 @@ function Get-RelaunchArgumentList {
     foreach ($key in $Bound.Keys) {
         if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
+        if ($key -eq 'Enable') {
+            $controlIds = @(ConvertTo-ControlIds -Ids @($value))
+            $list += '-Enable'
+            $list += ConvertTo-NativeArgument -Value ($controlIds -join ',')
+            continue
+        }
         if ($value -is [switch]) {
             # Windows PowerShell 5.1 -File cannot bind explicit switch booleans.
             # False switches keep their default by omission in a fresh child.
             if ($value.IsPresent) { $list += ('-{0}' -f $key) }
         }
         elseif ($value -is [array]) {
-            # powershell.exe -File does not bind several native argv elements to an
-            # array parameter. Enable uses one comma-separated string on relaunch.
-            if ($key -ne 'Enable') { throw 'Only the Enable parameter accepts an array.' }
-            foreach ($controlId in $value) {
-                if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control {0}.' -f $controlId) }
-            }
-            $list += '-Enable'
-            $list += ConvertTo-NativeArgument -Value ($value -join ',')
+            throw 'Only the Enable parameter accepts an array.'
         }
         elseif ($null -ne $value) {
             $list += ('-{0}' -f $key)
@@ -473,6 +477,20 @@ function Get-RelaunchArgumentList {
         }
     }
     return $list
+}
+
+function ConvertTo-ControlIds {
+    param([string[]]$Ids)
+    $normalized = @()
+    foreach ($entry in (ConvertTo-Array $Ids)) {
+        foreach ($part in ($entry -split ',')) {
+            $controlId = $part.Trim().ToLowerInvariant()
+            if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $controlId) }
+            if ($normalized -notcontains $controlId) { $normalized += $controlId }
+        }
+    }
+    if ($normalized.Count -eq 0) { throw 'Specify at least one control with -Enable.' }
+    return $normalized
 }
 
 function Request-Elevation {
@@ -524,15 +542,16 @@ function Get-SelfIntegrity {
         endings normalized. Detects accidental corruption in transit. It is NOT a security
         boundary: anyone who can edit the script can recompute the value.
     #>
-    $result = [pscustomobject]@{ Status = 'Unknown'; Expected = $script:ExpectedIntegrityHash; Actual = $null; Path = $null }
+    $expected = Get-Variable -Name ExpectedIntegrityHash -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $result = [pscustomobject]@{ Status = 'Unknown'; Expected = $expected; Actual = $null; Path = $null }
     try {
         $path = $PSCommandPath
-        if ([string]::IsNullOrWhiteSpace($path)) { $result.Status = 'Skipped'; return $result }
+        if ([string]::IsNullOrWhiteSpace($path)) { $result.Status = 'Error'; return $result }
         $result.Path = $path
 
         $text = [IO.File]::ReadAllText($path)
         $pattern = '(?m)^\$script:ExpectedIntegrityHash\s*=\s*''[0-9A-Fa-f]{64}''\s*$'
-        if (-not [regex]::IsMatch($text, $pattern)) { $result.Status = 'Skipped'; return $result }
+        if ([regex]::Matches($text, $pattern).Count -ne 1 -or $expected -notmatch '^[0-9A-Fa-f]{64}$') { $result.Status = 'Failed'; return $result }
 
         $normalized = [regex]::Replace($text, $pattern, ("`$script:ExpectedIntegrityHash = '{0}'" -f ('0' * 64)), 1)
         $normalized = ($normalized -replace "`r`n", "`n") -replace "`r", "`n"
@@ -544,8 +563,8 @@ function Get-SelfIntegrity {
         }
         finally { $sha.Dispose() }
 
-        if ($script:ExpectedIntegrityHash -eq ('0' * 64)) { $result.Status = 'Unsigned' }
-        elseif ($result.Actual -eq $script:ExpectedIntegrityHash.ToLowerInvariant()) { $result.Status = 'OK' }
+        if ($expected -eq ('0' * 64)) { $result.Status = 'Unsigned' }
+        elseif ($result.Actual -eq $expected.ToLowerInvariant()) { $result.Status = 'OK' }
         else { $result.Status = 'Failed' }
     }
     catch {

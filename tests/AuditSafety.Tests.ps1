@@ -20,6 +20,7 @@ Describe 'Safety decisions and consistent projections' {
         $script:Unattended = $true
         $script:RestartRequired = $false
         $script:AppliedChanges = @()
+        $script:RevertedChanges = @()
         $script:Warnings = @()
         $script:ExitCode = 0
         $script:UseColor = $false
@@ -33,7 +34,7 @@ Describe 'Safety decisions and consistent projections' {
         $WhatIfPreference = $false
         $testState = New-SyntheticState
         Mock Test-IsElevated { $true }
-        Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'Verified' } }
+        Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'OK' } }
         Mock Get-SystemState { $testState }
         Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
         Mock Write-Line {}

@@ -1,6 +1,6 @@
 # WinDSH v2 usage
 
-This guide describes WinDSH v2.0.0. For other versions, use the documentation
+This guide describes the v2.0.1 source. For packaged versions, use the documentation
 from the matching release tag.
 
 [Back to the README](../README.md)
@@ -35,6 +35,11 @@ Credential Guard, Secure Launch, and kernel shadow stacks remain opt-in:
 .\WinDSH.ps1 -Enable credential-guard
 .\WinDSH.ps1 -Enable hvci,driver-blocklist
 ```
+
+Existing VBS/Memory Integrity locks and locked Credential Guard are preserved.
+New settings use reversible defaults; WinDSH does not remove firmware locks.
+Unreadable local or policy values, unexpected registry types, and unrecognized
+platform-security values block the affected changes and require review.
 
 Memory Integrity is skipped if recent Code Integrity event 3087 evidence exists
 or the compatibility log cannot be queried. This applies to both the safe set and
@@ -100,6 +105,8 @@ The JSON stdout `exitCode` matches the process exit code. A partial failure take
 precedence over restart-required success. Custom report/debug paths are written
 with administrator privileges after elevation; select trusted locations.
 Reports and debug logs are local and are never uploaded automatically.
+Each report save has a unique filename and refuses to overwrite an existing report.
+See [JSON and RMM schema 2.1](REPORT_SCHEMA.md) before updating automation consumers.
 
 ## Score and CIS interpretation
 
@@ -109,12 +116,20 @@ controls are applicable. A score of 100 on limited hardware is not equivalent to
 Secured-core qualification, and is not an overall measure of endpoint security.
 Detection-only controls have zero scoring weight.
 
+`Unknown` means the required evidence could not be verified. Scored unknown controls
+stay in the denominator, earn no points, and produce an **Incomplete assessment**
+grade. Shadow-stack `AuditMode` earns no enforcement points. Configuration-only
+controls describe registry requirements; they do not independently prove runtime
+enforcement. Missing policy evidence produces unknown CIS results rather than a
+claim that policy is absent.
+
 The comparison targets **CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0,
 section 18.9.5**. CIS checks the Group Policy hive; WinDSH writes local values under
 `HKLM\SYSTEM\CurrentControlSet\Control` and never writes Group Policy. Protections
 can run while the policy-based CIS checks still fail. WinDSH also enables Memory
-Integrity and Credential Guard **without UEFI locks** so those changes can be undone
-from Windows; the mapped CIS settings require the locked form.
+Integrity and Credential Guard **without UEFI locks when newly configured**, so
+those changes can be undone from Windows. Existing locks remain in place; the
+mapped CIS settings require the locked form.
 
 ## Rollback
 
@@ -139,6 +154,9 @@ catalog/current-state checks, but lack original write-completion evidence.
 Malformed terminated or middle records block change operations; only a torn final
 append is recoverable. Keep the journal when troubleshooting an interrupted run.
 The inherited `WINDSH_JOURNAL_PATH` environment variable is ignored.
+Reports record actual rollback writes in `RevertedChanges`. RMM `changes` includes
+both applied and reverted registry writes, with separate counts for each. Preview
+and recovery of an already-restored value do not count as new registry writes.
 
 ## Exit codes and restart
 

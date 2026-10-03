@@ -40,8 +40,8 @@ $script:ControlCatalog = @(
         LocalValues = @(
             @{ Path = $script:RegDeviceGuard; Name = 'EnableVirtualizationBasedSecurity'; Type = 'DWord'; Value = 1
                Note = 'Turns VBS on.' }
-            @{ Path = $script:RegDeviceGuard; Name = 'Locked'; Type = 'DWord'; Value = 0
-               Note = 'No UEFI lock, so the change can be undone from Windows.' }
+            @{ Path = $script:RegDeviceGuard; Name = 'Locked'; Type = 'DWord'; Value = 0; AcceptedValues = @(0, 1); KnownValues = @(0, 1)
+               Note = 'Use no UEFI lock for new settings; preserve an existing lock.' }
         )
         PolicyValues = @(
             @{ Name = 'EnableVirtualizationBasedSecurity'; Expected = 1 }
@@ -70,11 +70,11 @@ $script:ControlCatalog = @(
         DetectKey   = 'PlatformSecurity'
         LocalValues = @(
             # 1 = Secure Boot only, 3 = Secure Boot and DMA protection. CIS accepts either,
-            # so 1 is a floor rather than a target: an administrator who chose 3 keeps it.
+            # so accept 1 or 3 explicitly: an administrator who chose 3 keeps it.
             # Note 3 is stricter, not simply better - on hardware without an IOMMU it
             # prevents VBS from starting at all.
             @{ Path = $script:RegDeviceGuard; Name = 'RequirePlatformSecurityFeatures'; Type = 'DWord'; Value = 1
-               Comparison = 'AtLeast'
+               AcceptedValues = @(1, 3); KnownValues = @(0, 1, 3)
                Note = 'Secure Boot required. An existing value of 3 (Secure Boot + DMA) is preserved.' }
         )
         PolicyValues = @(
@@ -116,7 +116,7 @@ $script:ControlCatalog = @(
         }
         LocalValues = @(
             @{ Path = $script:RegHvci; Name = 'Enabled'; Type = 'DWord'; Value = 1; Note = 'Turns Memory Integrity on.' }
-            @{ Path = $script:RegHvci; Name = 'Locked'; Type = 'DWord'; Value = 0; Note = 'No UEFI lock, so it stays revertible.' }
+            @{ Path = $script:RegHvci; Name = 'Locked'; Type = 'DWord'; Value = 0; AcceptedValues = @(0, 1); KnownValues = @(0, 1); Note = 'Use no UEFI lock for new settings; preserve an existing lock.' }
         )
         PolicyValues = @(
             # CIS wants 1 = Enabled with UEFI lock. WinDSH deliberately configures the
@@ -177,9 +177,9 @@ $script:ControlCatalog = @(
         DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/'
         DetectKey   = 'CredentialGuard'
         LocalValues = @(
-            # 1 = enabled with UEFI lock, 2 = enabled without lock. WinDSH uses 2.
-            @{ Path = $script:RegLsa; Name = 'LsaCfgFlags'; Type = 'DWord'; Value = 2
-               Note = 'Enabled without a UEFI lock, so it can be switched off again from Windows.' }
+            # 1 = enabled with UEFI lock, 2 = enabled without lock. Use 2 for new settings.
+            @{ Path = $script:RegLsa; Name = 'LsaCfgFlags'; Type = 'DWord'; Value = 2; AcceptedValues = @(1, 2); KnownValues = @(0, 1, 2)
+               Note = 'Enable without a UEFI lock for new settings; preserve an existing lock.' }
         )
         PolicyValues = @(
             @{ Name = 'LsaCfgFlags'; Expected = 1 }

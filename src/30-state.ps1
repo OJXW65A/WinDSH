@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
 # State collection.
 #
-# Split into static and volatile. Hardware, firmware, TPM and OS identity cannot change
-# while WinDSH is running, so they are collected once. Only the DeviceGuard state,
+# Split into static and volatile. Hardware, firmware, TPM and OS identity rarely change
+# during a session, so they are cached until an explicit re-check. DeviceGuard state,
 # registry values and restart status are re-read after a change. In v1 every menu action
 # re-ran the whole collection, including Get-ComputerInfo and a bcdedit process spawn,
 # to learn a handful of registry DWORDs.
@@ -10,14 +10,26 @@
 
 $script:StaticState = $null
 
+function Get-HardwareCimState {
+    param([string[]]$ClassNames = @('Win32_OperatingSystem', 'Win32_ComputerSystem', 'Win32_Processor'))
+    $snapshot = [pscustomobject]@{ OperatingSystem = $null; ComputerSystem = $null; Processors = @() }
+    foreach ($className in $ClassNames) {
+        try {
+            $instances = @(Get-CimInstance -ClassName $className -ErrorAction Stop)
+            switch ($className) {
+                'Win32_OperatingSystem' { if ($instances.Count) { $snapshot.OperatingSystem = $instances[0] } }
+                'Win32_ComputerSystem' { if ($instances.Count) { $snapshot.ComputerSystem = $instances[0] } }
+                'Win32_Processor' { $snapshot.Processors = $instances }
+            }
+        }
+        catch { Write-DebugError ('Query {0}' -f $className) $_ }
+    }
+    return $snapshot
+}
+
 function Get-OsAndHardwareState {
-    $os = $null; $cs = $null; $cpus = @()
-    try { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop }
-    catch { Write-DebugError 'Query Win32_OperatingSystem' $_ }
-    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop }
-    catch { Write-DebugError 'Query Win32_ComputerSystem' $_ }
-    try { $cpus = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop) }
-    catch { Write-DebugError 'Query Win32_Processor' $_ }
+    param($CimState = (Get-HardwareCimState))
+    $os = $CimState.OperatingSystem; $cs = $CimState.ComputerSystem; $cpus = @($CimState.Processors)
 
     $build = 0
     $buildText = [string](Get-PropertySafe $os 'BuildNumber' '0')
@@ -131,19 +143,11 @@ function Get-TpmState {
 }
 
 function Get-VirtualizationState {
-    $hypervisorPresent = $false; $vmx = $null; $slat = $null
-    try {
-        $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-        $hypervisorPresent = [bool](Get-PropertySafe $cs 'HypervisorPresent' $false)
-    }
-    catch { Write-DebugError 'Query HypervisorPresent' $_ }
-
-    try {
-        $cpu = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)[0]
-        $vmx = Get-PropertySafe $cpu 'VirtualizationFirmwareEnabled' $null
-        $slat = Get-PropertySafe $cpu 'SecondLevelAddressTranslationExtensions' $null
-    }
-    catch { Write-DebugError 'Query processor virtualization' $_ }
+    param($CimState = (Get-HardwareCimState -ClassNames @('Win32_ComputerSystem', 'Win32_Processor')))
+    $hypervisorPresent = [bool](Get-PropertySafe $CimState.ComputerSystem 'HypervisorPresent' $false)
+    $cpu = if (@($CimState.Processors).Count) { @($CimState.Processors)[0] } else { $null }
+    $vmx = Get-PropertySafe $cpu 'VirtualizationFirmwareEnabled' $null
+    $slat = Get-PropertySafe $cpu 'SecondLevelAddressTranslationExtensions' $null
 
     # When Hyper-V owns the CPU, VirtualizationFirmwareEnabled often reports false even
     # though virtualization is plainly working. Treat a running hypervisor as proof.
@@ -192,11 +196,12 @@ function Get-HypervisorLaunchState {
 
 function Get-DeviceGuardState {
     $dg = $null
+    $queryError = $null
     try {
         $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
                 -ClassName 'Win32_DeviceGuard' -ErrorAction Stop
     }
-    catch { Write-DebugError 'Query Win32_DeviceGuard' $_ }
+    catch { $queryError = $_.Exception.Message; Write-DebugError 'Query Win32_DeviceGuard' $_ }
 
     $configured = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesConfigured' @())
     $running    = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesRunning' @())
@@ -206,7 +211,9 @@ function Get-DeviceGuardState {
     $ciPolicy   = Get-PropertySafe $dg 'CodeIntegrityPolicyEnforcementStatus' $null
 
     return [pscustomobject]@{
-        Available = $dg -ne $null
+        Available = $null -ne $dg
+        RunningKnown = [bool]($null -ne $dg -and $null -ne $dg.PSObject.Properties['SecurityServicesRunning'] -and $null -ne $dg.SecurityServicesRunning)
+        Error = $queryError
         Configured = $configured
         Running = $running
         AvailableProperties = $available
@@ -236,13 +243,9 @@ function ConvertTo-VbsStatusText {
 }
 
 function Get-DepState {
-    $policy = $null; $supported = $null
-    try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-        $policy = Get-PropertySafe $os 'DataExecutionPrevention_SupportPolicy' $null
-        $supported = Get-PropertySafe $os 'DataExecutionPrevention_Available' $null
-    }
-    catch { Write-DebugError 'Query DEP state' $_ }
+    param($CimState = (Get-HardwareCimState -ClassNames @('Win32_OperatingSystem')))
+    $policy = Get-PropertySafe $CimState.OperatingSystem 'DataExecutionPrevention_SupportPolicy' $null
+    $supported = Get-PropertySafe $CimState.OperatingSystem 'DataExecutionPrevention_Available' $null
 
     # 0 AlwaysOff, 1 AlwaysOn, 2 OptIn (Windows components only), 3 OptOut (all programs)
     $text = switch ($policy) {
@@ -439,33 +442,45 @@ function Get-PolicyState {
         because CIS section 18.9.5 audits this hive rather than the local one.
     #>
     $values = @{}
+    $errors = @{}
     foreach ($control in $script:ControlCatalog) {
         foreach ($pv in (ConvertTo-Array $control.PolicyValues)) {
             if (-not $values.ContainsKey($pv.Name)) {
-                $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+                try {
+                    $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+                    if ($null -ne $values[$pv.Name] -and (Get-RegKind -Path $script:RegPolicyDG -Name $pv.Name) -ne 'DWord') { throw 'The policy registry value is not a DWORD.' }
+                }
+                catch {
+                    $values[$pv.Name] = $null
+                    $errors[$pv.Name] = $_.Exception.Message
+                    Write-DebugError ('Read policy {0}' -f $pv.Name) $_
+                }
             }
         }
     }
     return [pscustomobject]@{
         Path = $script:RegPolicyDG
         Values = $values
+        Available = ($errors.Count -eq 0)
+        Errors = $errors
         AnyConfigured = [bool](@($values.Values | Where-Object { $null -ne $_ }).Count -gt 0)
     }
 }
 
 function Get-StaticState {
-    <# Collected once. Nothing here can change while WinDSH is running. #>
+    <# Cached until the user requests a full re-check. #>
     if ($null -ne $script:StaticState) { return $script:StaticState }
     Write-Debug-Log 'Collecting static state'
-    $computer = Get-OsAndHardwareState
-    $virtualization = Get-VirtualizationState
+    $cimState = Get-HardwareCimState
+    $computer = Get-OsAndHardwareState -CimState $cimState
+    $virtualization = Get-VirtualizationState -CimState $cimState
     $script:StaticState = [pscustomobject]@{
         Computer = $computer
         Firmware = Get-FirmwareState
         Tpm = Get-TpmState
         Virtualization = $virtualization
         HypervisorLaunch = Get-HypervisorLaunchState
-        Dep = Get-DepState
+        Dep = Get-DepState -CimState $cimState
         VirtualMachine = Get-VirtualMachineAssessment -Computer $computer -Virtualization $virtualization
     }
     return $script:StaticState
