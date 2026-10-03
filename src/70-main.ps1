@@ -336,7 +336,7 @@ function Invoke-Interactive {
 
         switch ($choice) {
             '1' {
-                $State = Get-SystemState -Volatile
+                $State = Get-SystemState
                 $assessment = Get-Assessment -State $State
                 Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
                 Show-NextSteps -Explanations $assessment.Explanations

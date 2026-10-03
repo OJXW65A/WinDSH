@@ -326,6 +326,18 @@ Describe 'Audit defect regressions' {
         [IO.File]::ReadAllText($path) | Should -BeExactly 'Original report'
     }
 
+    It 'requests a full refresh when the user chooses Re-check' {
+        $script:MenuReads = 0
+        Mock Read-Choice { $script:MenuReads++; if ($script:MenuReads -eq 1) { '1' } else { 'Q' } }
+        Mock Wait-ForKey {}
+        Mock Show-Menu {}
+        Mock Show-Summary {}
+        Mock Show-NextSteps {}
+        Invoke-Interactive -State $testState
+        Should -Invoke Get-SystemState -Times 1 -Exactly -ParameterFilter { -not [bool]$Volatile }
+        Should -Invoke Get-SystemState -Times 0 -Exactly -ParameterFilter { [bool]$Volatile }
+    }
+
     It 'renders valid fractional SVG numbers with the <Culture> locale' -TestCases @(
         @{ Culture = 'fr-FR' }, @{ Culture = 'de-DE' }, @{ Culture = 'en-US' }
     ) {
@@ -344,6 +356,61 @@ Describe 'Audit defect regressions' {
             [math]::Abs($sum - 439.82) | Should -BeLessThan 0.01
         }
         finally { [Globalization.CultureInfo]::CurrentCulture = $previous }
+    }
+}
+
+Describe 'Shared hardware collection' {
+    BeforeEach {
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $script:StaticState = $null
+        $script:BootBlocks = $false
+        $sample = New-SyntheticState
+        Mock Get-CimInstance {
+            switch ($ClassName) {
+                'Win32_OperatingSystem' { [pscustomobject]@{ BuildNumber = '22631'; Caption = 'Windows 11'; DataExecutionPrevention_SupportPolicy = 3; DataExecutionPrevention_Available = $true } }
+                'Win32_ComputerSystem' { [pscustomobject]@{ Manufacturer = 'Test'; Model = 'Test PC'; HypervisorPresent = $true } }
+                'Win32_Processor' { [pscustomobject]@{ Name = 'Test CPU'; VirtualizationFirmwareEnabled = $false; SecondLevelAddressTranslationExtensions = $true } }
+                default { throw ('Unexpected CIM query: {0}' -f $ClassName) }
+            }
+        }
+        Mock Get-FirmwareState { $sample.Firmware }
+        Mock Get-TpmState { $sample.Tpm }
+        Mock Get-HypervisorLaunchState { [pscustomobject]@{ BlocksVbs = $script:BootBlocks; LaunchType = $(if ($script:BootBlocks) { 'Off' } else { 'Auto' }); Source = 'Test'; Error = $null } }
+        Mock Get-DeviceGuardState { $sample.DeviceGuard }
+        Mock Get-PolicyState { $sample.Policy }
+        Mock Get-PendingRestartState { $sample.Restart }
+    }
+
+    It 'queries each hardware class once and reuses the snapshot after local changes' {
+        $state = Get-SystemState
+        $state.Computer.BuildNumber | Should -Be 22631
+        $state.Computer.ProcessorName | Should -Be 'Test CPU'
+        $state.Virtualization.FirmwareEnabled | Should -BeTrue
+        $state.Virtualization.Slat | Should -BeTrue
+        $state.Dep.SupportPolicy | Should -Be 3
+        $state.Dep.Enabled | Should -BeTrue
+        $null = Get-SystemState -Volatile
+        foreach ($class in @('Win32_OperatingSystem','Win32_ComputerSystem','Win32_Processor')) {
+            Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq $class }
+        }
+    }
+
+    It 'refreshes externally changed boot settings during a full re-check' {
+        (Get-SystemState).HypervisorLaunch.BlocksVbs | Should -BeFalse
+        $script:BootBlocks = $true
+        (Get-SystemState -Volatile).HypervisorLaunch.BlocksVbs | Should -BeFalse
+        (Get-SystemState).HypervisorLaunch.BlocksVbs | Should -BeTrue
+        Should -Invoke Get-HypervisorLaunchState -Times 2 -Exactly
+    }
+
+    It 'does not retry failed hardware queries or invent missing evidence' {
+        Mock Get-CimInstance { throw 'Synthetic unavailable OS' } -ParameterFilter { $ClassName -eq 'Win32_OperatingSystem' }
+        $state = Get-SystemState
+        $state.Computer.BuildNumber | Should -Be 0
+        $state.Dep.SupportPolicy | Should -BeNullOrEmpty
+        $state.Dep.Enabled | Should -BeFalse
+        (Get-ControlStatus 'dep' $state).State | Should -Be 'Unknown'
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -eq 'Win32_OperatingSystem' }
     }
 }
 
