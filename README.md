@@ -9,6 +9,19 @@ comparison with CIS Device Guard policy settings.
 
 **Contact:** windsh@rootauthority.com
 
+## Download
+
+These are the only two files needed to run WinDSH. Download both:
+
+- [Download Run-WinDSH-AsAdmin.bat](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/Run-WinDSH-AsAdmin.bat) — launcher that requests Administrator rights.
+- [Download WinDSH.ps1](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/WinDSH.ps1) — the complete WinDSH application.
+
+Save both files in the **same folder**, then double-click **Run-WinDSH-AsAdmin.bat**
+and approve the administrator prompt.
+
+If a link opens as text, right-click the link and choose **Save link as...**.
+Keep the original `.bat` and `.ps1` file extensions.
+
 ## Requirements
 
 - Windows 10 or Windows 11; Windows PowerShell 5.1 or PowerShell 7.
