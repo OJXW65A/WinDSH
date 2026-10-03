@@ -192,11 +192,12 @@ function Get-HypervisorLaunchState {
 
 function Get-DeviceGuardState {
     $dg = $null
+    $queryError = $null
     try {
         $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
                 -ClassName 'Win32_DeviceGuard' -ErrorAction Stop
     }
-    catch { Write-DebugError 'Query Win32_DeviceGuard' $_ }
+    catch { $queryError = $_.Exception.Message; Write-DebugError 'Query Win32_DeviceGuard' $_ }
 
     $configured = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesConfigured' @())
     $running    = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesRunning' @())
@@ -206,7 +207,9 @@ function Get-DeviceGuardState {
     $ciPolicy   = Get-PropertySafe $dg 'CodeIntegrityPolicyEnforcementStatus' $null
 
     return [pscustomobject]@{
-        Available = $dg -ne $null
+        Available = $null -ne $dg
+        RunningKnown = [bool]($null -ne $dg -and $null -ne $dg.PSObject.Properties['SecurityServicesRunning'] -and $null -ne $dg.SecurityServicesRunning)
+        Error = $queryError
         Configured = $configured
         Running = $running
         AvailableProperties = $available
@@ -439,16 +442,27 @@ function Get-PolicyState {
         because CIS section 18.9.5 audits this hive rather than the local one.
     #>
     $values = @{}
+    $errors = @{}
     foreach ($control in $script:ControlCatalog) {
         foreach ($pv in (ConvertTo-Array $control.PolicyValues)) {
             if (-not $values.ContainsKey($pv.Name)) {
-                $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+                try {
+                    $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+                    if ($null -ne $values[$pv.Name] -and (Get-RegKind -Path $script:RegPolicyDG -Name $pv.Name) -ne 'DWord') { throw 'The policy registry value is not a DWORD.' }
+                }
+                catch {
+                    $values[$pv.Name] = $null
+                    $errors[$pv.Name] = $_.Exception.Message
+                    Write-DebugError ('Read policy {0}' -f $pv.Name) $_
+                }
             }
         }
     }
     return [pscustomobject]@{
         Path = $script:RegPolicyDG
         Values = $values
+        Available = ($errors.Count -eq 0)
+        Errors = $errors
         AnyConfigured = [bool](@($values.Values | Where-Object { $null -ne $_ }).Count -gt 0)
     }
 }

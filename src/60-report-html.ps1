@@ -19,6 +19,8 @@ function Get-StateLabel {
         'ConfiguredNotRunning' { return @{ Text = 'Needs restart or unsupported'; Class = 'warn' } }
         'NotConfigured' { return @{ Text = 'Off'; Class = 'bad' } }
         'NotSupported' { return @{ Text = 'Not available on this PC'; Class = 'na' } }
+        'Unknown' { return @{ Text = 'Unable to verify'; Class = 'warn' } }
+        'AuditMode' { return @{ Text = 'Audit only; not enforcing'; Class = 'warn' } }
         default { return @{ Text = $State; Class = 'na' } }
     }
 }
@@ -112,6 +114,7 @@ a{color:inherit}
     $null = $sb.AppendLine('<h2>Applicable protection score</h2>')
     $null = $sb.AppendLine(('<p class="tiny">{0} of {1} scored controls are applicable; unsupported controls are excluded.</p>' -f $Score.ApplicableCount, $Score.TotalCount))
     $null = $sb.AppendLine(('<p class="verdict">{0} of {1} applicable protections are active on this computer.</p>' -f $running, $countable))
+    if ($Score.UnknownCount -gt 0) { $null = $sb.AppendLine(('<p class="note">{0} scored protection(s) could not be verified. No points are credited for them, and they remain in the total.</p>' -f $Score.UnknownCount)) }
     if ($Score.ExcludedCount -gt 0) {
         $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because current platform requirements are not met. They are not counted against you.</p>' -f $Score.ExcludedCount))
     }
@@ -184,9 +187,9 @@ a{color:inherit}
     $null = $sb.AppendLine(('<p>{0} of {1} checks pass. {2} protection(s) are actually running on this computer but still fail their CIS check for the reason above.</p>' -f $Cis.CompliantCount, $Cis.TotalCount, $Cis.RunningButNotCompliantCount))
     $null = $sb.AppendLine('<table><thead><tr><th>CIS</th><th>Requirement</th><th>Policy value</th><th>CIS result</th><th>Actually running</th></tr></thead><tbody>')
     foreach ($r in $Cis.Rows) {
-        $cls = if ($r.Compliant) { 'ok' } else { 'bad' }
-        $txt = if ($r.Compliant) { 'Pass' } else { 'Fail' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $cls = if (-not $r.PolicyKnown) { 'warn' } elseif ($r.Compliant) { 'ok' } else { 'bad' }
+        $txt = if (-not $r.PolicyKnown) { 'Unknown' } elseif ($r.Compliant) { 'Pass' } else { 'Fail' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         $runCls = if ($r.FeatureRunning) { 'ok' } else { 'na' }
         $runTxt = if ($r.FeatureRunning) { 'Yes' } else { 'No' }
         $null = $sb.AppendLine(('<tr><td>{0}<br><span class="tiny">{1}</span></td><td>{2}</td><td><code>{3}</code> = {4}</td><td><span class="badge {5}">{6}</span></td><td><span class="badge {7}">{8}</span></td></tr>' -f `

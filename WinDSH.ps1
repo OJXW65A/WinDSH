@@ -145,11 +145,11 @@ $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
 $script:ToolVersion     = '2.0.0'
-$script:SchemaVersion   = '2.0'
+$script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = '681a8d04e1583527a3fc0479ff066d21b07f1ae7590ad6ef6d9af450727986af'
+$script:ExpectedIntegrityHash = '3fdc2691523b0e859d07a7b5c7d30ead6c1992b1ebddc184a1c42e38ec9071d3'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -213,6 +213,7 @@ function Write-Section {
 
 function Add-Warning {
     param([string]$Message)
+    if ($script:Warnings -contains $Message) { return }
     $script:Warnings += $Message
     Write-Debug-Log ('WARNING: {0}' -f $Message)
 }
@@ -287,21 +288,16 @@ function New-RegistryProvider {
         Kind = 'Windows'
         GetValue = {
             param([string]$Path, [string]$Name)
-            try {
-                if (-not (Test-Path -LiteralPath $Path)) { return $null }
-                $item = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
-                return $item.$Name
-            }
-            catch { return $null }
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $null }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            if (@($key.GetValueNames()) -notcontains $Name) { return $null }
+            return $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         }
         ValueExists = {
             param([string]$Path, [string]$Name)
-            try {
-                if (-not (Test-Path -LiteralPath $Path)) { return $false }
-                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-                return [bool](@($key.GetValueNames()) -contains $Name)
-            }
-            catch { return $false }
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $false }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return [bool](@($key.GetValueNames()) -contains $Name)
         }
         GetKind = {
             param([string]$Path, [string]$Name)
@@ -366,6 +362,14 @@ function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
 function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
+
+function Test-CatalogValueSatisfied {
+    param([hashtable]$Definition, $Current)
+    if ($null -eq $Current) { return $false }
+    if ($Definition.ContainsKey('AcceptedValues')) { return [bool](@($Definition.AcceptedValues) -contains [long]$Current) }
+    if ($Definition.ContainsKey('Comparison') -and $Definition.Comparison -eq 'AtLeast') { return [bool]([long]$Current -ge [long]$Definition.Value) }
+    return [bool]([long]$Current -eq [long]$Definition.Value)
+}
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -597,8 +601,8 @@ $script:ControlCatalog = @(
         LocalValues = @(
             @{ Path = $script:RegDeviceGuard; Name = 'EnableVirtualizationBasedSecurity'; Type = 'DWord'; Value = 1
                Note = 'Turns VBS on.' }
-            @{ Path = $script:RegDeviceGuard; Name = 'Locked'; Type = 'DWord'; Value = 0
-               Note = 'No UEFI lock, so the change can be undone from Windows.' }
+            @{ Path = $script:RegDeviceGuard; Name = 'Locked'; Type = 'DWord'; Value = 0; AcceptedValues = @(0, 1); KnownValues = @(0, 1)
+               Note = 'Use no UEFI lock for new settings; preserve an existing lock.' }
         )
         PolicyValues = @(
             @{ Name = 'EnableVirtualizationBasedSecurity'; Expected = 1 }
@@ -627,11 +631,11 @@ $script:ControlCatalog = @(
         DetectKey   = 'PlatformSecurity'
         LocalValues = @(
             # 1 = Secure Boot only, 3 = Secure Boot and DMA protection. CIS accepts either,
-            # so 1 is a floor rather than a target: an administrator who chose 3 keeps it.
+            # so accept 1 or 3 explicitly: an administrator who chose 3 keeps it.
             # Note 3 is stricter, not simply better - on hardware without an IOMMU it
             # prevents VBS from starting at all.
             @{ Path = $script:RegDeviceGuard; Name = 'RequirePlatformSecurityFeatures'; Type = 'DWord'; Value = 1
-               Comparison = 'AtLeast'
+               AcceptedValues = @(1, 3); KnownValues = @(0, 1, 3)
                Note = 'Secure Boot required. An existing value of 3 (Secure Boot + DMA) is preserved.' }
         )
         PolicyValues = @(
@@ -673,7 +677,7 @@ $script:ControlCatalog = @(
         }
         LocalValues = @(
             @{ Path = $script:RegHvci; Name = 'Enabled'; Type = 'DWord'; Value = 1; Note = 'Turns Memory Integrity on.' }
-            @{ Path = $script:RegHvci; Name = 'Locked'; Type = 'DWord'; Value = 0; Note = 'No UEFI lock, so it stays revertible.' }
+            @{ Path = $script:RegHvci; Name = 'Locked'; Type = 'DWord'; Value = 0; AcceptedValues = @(0, 1); KnownValues = @(0, 1); Note = 'Use no UEFI lock for new settings; preserve an existing lock.' }
         )
         PolicyValues = @(
             # CIS wants 1 = Enabled with UEFI lock. WinDSH deliberately configures the
@@ -734,9 +738,9 @@ $script:ControlCatalog = @(
         DocUrl      = 'https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/'
         DetectKey   = 'CredentialGuard'
         LocalValues = @(
-            # 1 = enabled with UEFI lock, 2 = enabled without lock. WinDSH uses 2.
-            @{ Path = $script:RegLsa; Name = 'LsaCfgFlags'; Type = 'DWord'; Value = 2
-               Note = 'Enabled without a UEFI lock, so it can be switched off again from Windows.' }
+            # 1 = enabled with UEFI lock, 2 = enabled without lock. Use 2 for new settings.
+            @{ Path = $script:RegLsa; Name = 'LsaCfgFlags'; Type = 'DWord'; Value = 2; AcceptedValues = @(1, 2); KnownValues = @(0, 1, 2)
+               Note = 'Enable without a UEFI lock for new settings; preserve an existing lock.' }
         )
         PolicyValues = @(
             @{ Name = 'LsaCfgFlags'; Expected = 1 }
@@ -1131,11 +1135,12 @@ function Get-HypervisorLaunchState {
 
 function Get-DeviceGuardState {
     $dg = $null
+    $queryError = $null
     try {
         $dg = Get-CimInstance -Namespace 'root\Microsoft\Windows\DeviceGuard' `
                 -ClassName 'Win32_DeviceGuard' -ErrorAction Stop
     }
-    catch { Write-DebugError 'Query Win32_DeviceGuard' $_ }
+    catch { $queryError = $_.Exception.Message; Write-DebugError 'Query Win32_DeviceGuard' $_ }
 
     $configured = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesConfigured' @())
     $running    = ConvertTo-Array (Get-PropertySafe $dg 'SecurityServicesRunning' @())
@@ -1145,7 +1150,9 @@ function Get-DeviceGuardState {
     $ciPolicy   = Get-PropertySafe $dg 'CodeIntegrityPolicyEnforcementStatus' $null
 
     return [pscustomobject]@{
-        Available = $dg -ne $null
+        Available = $null -ne $dg
+        RunningKnown = [bool]($null -ne $dg -and $null -ne $dg.PSObject.Properties['SecurityServicesRunning'] -and $null -ne $dg.SecurityServicesRunning)
+        Error = $queryError
         Configured = $configured
         Running = $running
         AvailableProperties = $available
@@ -1378,16 +1385,27 @@ function Get-PolicyState {
         because CIS section 18.9.5 audits this hive rather than the local one.
     #>
     $values = @{}
+    $errors = @{}
     foreach ($control in $script:ControlCatalog) {
         foreach ($pv in (ConvertTo-Array $control.PolicyValues)) {
             if (-not $values.ContainsKey($pv.Name)) {
-                $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+                try {
+                    $values[$pv.Name] = Get-RegValue -Path $script:RegPolicyDG -Name $pv.Name
+                    if ($null -ne $values[$pv.Name] -and (Get-RegKind -Path $script:RegPolicyDG -Name $pv.Name) -ne 'DWord') { throw 'The policy registry value is not a DWORD.' }
+                }
+                catch {
+                    $values[$pv.Name] = $null
+                    $errors[$pv.Name] = $_.Exception.Message
+                    Write-DebugError ('Read policy {0}' -f $pv.Name) $_
+                }
             }
         }
     }
     return [pscustomobject]@{
         Path = $script:RegPolicyDG
         Values = $values
+        Available = ($errors.Count -eq 0)
+        Errors = $errors
         AnyConfigured = [bool](@($values.Values | Where-Object { $null -ne $_ }).Count -gt 0)
     }
 }
@@ -1454,67 +1472,84 @@ function Get-ControlRunningState {
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
 
     $dg = $State.DeviceGuard
+    $servicesKnown = [bool](Get-PropertySafe $dg 'RunningKnown' $dg.Available)
     switch ($Control.DetectKey) {
         'Vbs' {
             return [pscustomobject]@{
                 Running = [bool]($dg.VbsStatusCode -eq 2)
-                RunningKnown = [bool]($null -ne $dg.VbsStatusCode)
+                RunningKnown = [bool]($dg.Available -and $null -ne $dg.VbsStatusCode)
             }
         }
         'Hvci' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $servicesKnown }
         }
         'CredentialGuard' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $servicesKnown }
         }
         'SecureLaunch' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $servicesKnown }
         }
         'KernelShadowStacks' {
             return [pscustomobject]@{
-                Running = ((Test-Contains $dg.Running 5) -or (Test-Contains $dg.Running 6))
-                RunningKnown = $dg.Available
+                Running = (Test-Contains $dg.Running 5)
+                RunningKnown = $servicesKnown
+                AuditMode = [bool]((Test-Contains $dg.Running 6) -and -not (Test-Contains $dg.Running 5))
             }
         }
         'Hvpt' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $servicesKnown }
         }
         'SmmFirmware' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $servicesKnown }
         }
         'Dep' {
             return [pscustomobject]@{ Running = [bool]$State.Dep.Enabled; RunningKnown = [bool]($null -ne $State.Dep.SupportPolicy) }
         }
         default {
             # Registry-only controls have no separate running signal: configured is running.
-            return [pscustomobject]@{ Running = $null; RunningKnown = $false }
+            return [pscustomobject]@{ Running = $null; RunningKnown = $false; RegistryOnly = $true }
         }
     }
 }
 
 function Test-ControlConfigured {
     param([Parameter(Mandatory = $true)]$Control)
+    return [bool](Get-ControlConfiguration -Control $Control).Configured
+}
+
+function Get-ControlConfiguration {
+    param([Parameter(Mandatory = $true)]$Control)
     # A detection-only control has no values to write. Without this guard the loop below
     # would not execute and it would report as configured on every machine.
-    if (Get-PropertySafe $Control 'DetectionOnly' $false) { return $false }
+    if (Get-PropertySafe $Control 'DetectionOnly' $false) { return [pscustomobject]@{ Configured = $false; Error = $null } }
     $all = $true
+    $errors = @()
     foreach ($value in (ConvertTo-Array $Control.LocalValues)) {
-        $current = Get-RegValue -Path $value.Path -Name $value.Name
-        if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; break }
-        $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        if ($comparison -eq 'AtLeast') { if ([long]$current -lt [long]$value.Value) { $all = $false; break } }
-        else { if ([long]$current -ne [long]$value.Value) { $all = $false; break } }
+        try {
+            $current = Get-RegValue -Path $value.Path -Name $value.Name
+            if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; continue }
+            if ($value.ContainsKey('KnownValues') -and @($value.KnownValues) -notcontains [long]$current) {
+                $errors += ('{0} has an unrecognized value ({1}); review it manually.' -f $value.Name, $current)
+                $all = $false; continue
+            }
+            if (-not (Test-CatalogValueSatisfied -Definition $value -Current $current)) { $all = $false }
+        }
+        catch { $all = $false; $errors += ('Cannot read {0}: {1}' -f $value.Name, $_.Exception.Message) }
     }
-    return $all
+    return [pscustomobject]@{ Configured = $all; Error = $(if ($errors.Count) { $errors -join ' ' } else { $null }) }
 }
 
 function Get-ControlPolicyOverride {
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
     foreach ($pv in (ConvertTo-Array $Control.PolicyValues)) {
+        $errors = Get-PropertySafe $State.Policy 'Errors' @{}
+        if ($errors.ContainsKey($pv.Name)) {
+            return [pscustomobject]@{ Name = $pv.Name; Value = $null; Path = $State.Policy.Path; Error = $errors[$pv.Name] }
+        }
         if ($State.Policy.Values.ContainsKey($pv.Name)) {
             $value = $State.Policy.Values[$pv.Name]
             if ($null -ne $value) {
-                return [pscustomobject]@{ Name = $pv.Name; Value = $value; Path = $State.Policy.Path }
+                return [pscustomobject]@{ Name = $pv.Name; Value = $value; Path = $State.Policy.Path; Error = $null }
             }
         }
     }
@@ -1610,15 +1645,21 @@ function Get-ControlStatus {
     $control = Get-Control -Id $Id
     $support = Get-ControlSupport -Control $control -State $State
     $policy = Get-ControlPolicyOverride -Control $control -State $State
-    $configured = Test-ControlConfigured -Control $control
+    $configuration = Get-ControlConfiguration -Control $control
+    $configured = $configuration.Configured
     $run = Get-ControlRunningState -Control $control -State $State
 
-    $running = if ($run.RunningKnown) { [bool]$run.Running } else { $configured }
+    $registryOnly = [bool](Get-PropertySafe $run 'RegistryOnly' $false)
+    $runningKnown = if ($registryOnly) { -not [bool]$configuration.Error } else { [bool]$run.RunningKnown }
+    $running = if ($registryOnly) { [bool]($runningKnown -and $configured) } else { [bool]($runningKnown -and $run.Running) }
+    $auditMode = [bool]($runningKnown -and (Get-PropertySafe $run 'AuditMode' $false))
 
     # NOT named $state: PowerShell variable names are case-insensitive, so a local
     # $state would shadow the $State parameter and the recursive dependency call below
     # would receive this string instead of the system state object.
     $controlState = if (-not $support.Supported) { 'NotSupported' }
+                    elseif ($auditMode) { 'AuditMode' }
+                    elseif (-not $runningKnown -or (-not $running -and $configuration.Error)) { 'Unknown' }
                     elseif ($running) { 'Running' }
                     elseif ($configured) { 'ConfiguredNotRunning' }
                     else { 'NotConfigured' }
@@ -1640,12 +1681,15 @@ function Get-ControlStatus {
         Weight = $control.Weight
         State = $controlState
         Running = $running
+        RunningKnown = $runningKnown
         Configured = $configured
+        ConfigurationError = $configuration.Error
         Supported = $support.Supported
         SupportReason = $support.Reason
         SupportFix = $support.Fix
         ManagedByPolicy = [bool]($null -ne $policy)
         PolicyValue = if ($policy) { $policy.Value } else { $null }
+        PolicyReadError = if ($policy) { Get-PropertySafe $policy 'Error' $null } else { $null }
         BlockedBy = $blockedBy
         Cis = $control.Cis
     }
@@ -1679,6 +1723,8 @@ function Get-SecurityScore {
             'Running' { 1.0 }
             'ConfiguredNotRunning' { 0.5 }
             'NotConfigured' { 0.0 }
+            'Unknown' { 0.0 }
+            'AuditMode' { 0.0 }
             default { $null }
         }
         if ($null -eq $fraction) {
@@ -1698,10 +1744,13 @@ function Get-SecurityScore {
              elseif ($score -ge 50) { 'Fair' }
              elseif ($score -gt 0) { 'Weak' }
              else { 'Unprotected' }
+    $unknownCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.State -eq 'Unknown' }).Count
+    if ($unknownCount -gt 0) { $grade = 'Incomplete assessment' }
 
     return [pscustomobject]@{
         Score = $score
         Grade = $grade
+        UnknownCount = $unknownCount
         Earned = [math]::Round($earned, 1)
         Possible = [math]::Round($possible, 1)
         ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
@@ -1760,7 +1809,8 @@ function Get-CisComplianceReport {
             break
         }
 
-        $compliant = [bool]($null -ne $policyValue -and (@($accepted) -contains [int]$policyValue))
+        $policyKnown = -not [bool](Get-PropertySafe $status 'PolicyReadError' $null)
+        $compliant = [bool]($policyKnown -and $null -ne $policyValue -and (@($accepted) -contains [int]$policyValue))
 
         $rows += [pscustomobject]@{
             CisId = $control.Cis.Id
@@ -1771,6 +1821,7 @@ function Get-CisComplianceReport {
             Expected = $expected
             Actual = $policyValue
             Compliant = $compliant
+            PolicyKnown = $policyKnown
             FeatureRunning = [bool]($status -and $status.State -eq 'Running')
             Divergence = Get-PropertySafe $control.Cis 'Divergence' $null
         }
@@ -1784,7 +1835,8 @@ function Get-CisComplianceReport {
         Rows = $rows
         TotalCount = @($rows).Count
         CompliantCount = $compliantCount
-        RunningButNotCompliantCount = @($rows | Where-Object { $_.FeatureRunning -and -not $_.Compliant }).Count
+        UnknownCount = @($rows | Where-Object { -not $_.PolicyKnown }).Count
+        RunningButNotCompliantCount = @($rows | Where-Object { $_.PolicyKnown -and $_.FeatureRunning -and -not $_.Compliant }).Count
         Note = 'CIS audits the Group Policy hive. WinDSH configures local machine values and never writes Group Policy, so features can be active while these checks still report non-compliant.'
     }
 }
@@ -1801,7 +1853,22 @@ function Get-ControlExplanation {
 
     $verdict = $null; $action = $null; $severity = 'Info'
 
-    if ($status.State -eq 'Running') {
+    if ($status.PolicyReadError -or $status.ConfigurationError) {
+        $verdict = ('Configuration evidence for {0} could not be verified.' -f $control.Name)
+        $action = 'Review the registry or policy read error and restore access before remediation. WinDSH will skip this protection.'
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'Unknown') {
+        $verdict = ('Windows did not provide the running state of {0}.' -f $control.Name)
+        $action = 'Check access to the Windows security providers, then re-run the audit. Registry configuration alone does not prove this protection is active.'
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'AuditMode') {
+        $verdict = ('{0} is in audit mode; enforcement is not active.' -f $control.Name)
+        $action = 'Review compatibility and organization policy before enabling enforcement. Audit mode earns no enforcement points.'
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'Running') {
         $verdict = ('{0} is running. Nothing to do.' -f $control.Name)
         $severity = 'Good'
     }
@@ -1930,6 +1997,12 @@ function Get-HardwareCapabilityAdvice {
 function Get-Assessment {
     param([Parameter(Mandatory = $true)]$State)
     $statuses = @(Get-AllControlStatus -State $State)
+    $unknown = @($statuses | Where-Object State -eq 'Unknown')
+    if ($unknown.Count) { Add-Warning ('Running or configuration evidence is unavailable for {0} protection(s); the assessment is incomplete.' -f $unknown.Count) }
+    foreach ($status in $statuses) {
+        if ($status.PolicyReadError) { Add-Warning ('Cannot read policy for {0}: {1}' -f $status.Id, $status.PolicyReadError) }
+        if ($status.ConfigurationError) { Add-Warning ('Cannot verify configuration for {0}: {1}' -f $status.Id, $status.ConfigurationError) }
+    }
     return [pscustomobject]@{
         State = $State
         Statuses = $statuses
@@ -2279,14 +2352,18 @@ function Get-ControlDelta {
     $control = Get-Control -Id $Id
     $rows = @()
     foreach ($value in (ConvertTo-Array $control.LocalValues)) {
-        $exists = Test-RegValue -Path $value.Path -Name $value.Name
-        $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
+        $exists = $false; $current = $null; $currentType = $null; $readError = $null
+        try {
+            $exists = Test-RegValue -Path $value.Path -Name $value.Name
+            $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
+            $currentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
+        }
+        catch { $readError = $_.Exception.Message }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        $currentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
-
-        $needs = if (-not $exists -or $currentType -ne $value.Type) { $true }
-                 elseif ($comparison -eq 'AtLeast') { [long]$current -lt [long]$value.Value }
-                 else { [long]$current -ne [long]$value.Value }
+        $invalid = [bool]($exists -and $currentType -eq $value.Type -and $value.ContainsKey('KnownValues') -and @($value.KnownValues) -notcontains [long]$current)
+        $needs = if ($readError) { $false }
+                 elseif (-not $exists -or $currentType -ne $value.Type) { $true }
+                 else { -not (Test-CatalogValueSatisfied -Definition $value -Current $current) }
 
         $rows += [pscustomobject]@{
             ControlId = $control.Id
@@ -2300,6 +2377,8 @@ function Get-ControlDelta {
             CurrentType = $currentType
             DesiredValue = $value.Value
             NeedsChange = [bool]$needs
+            ReadError = $readError
+            InvalidValue = $invalid
             Note = $value.Note
         }
     }
@@ -2327,7 +2406,10 @@ function Get-ChangePlan {
             }
             $requiresOverride = [bool]($preflight -and $preflight.Tripped -and $preflight.BlocksSafeSet)
             $explicit = [bool]($ExplicitIds -contains $control.Id)
-            $skip = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
+            $skip = if ($status.PolicyReadError) { 'Cannot verify organization policy; restore read access before remediation.' }
+                    elseif (@($deltas | Where-Object ReadError).Count -gt 0) { 'Cannot read the existing registry state; remediation is blocked to preserve rollback data.' }
+                    elseif (@($deltas | Where-Object InvalidValue).Count -gt 0) { 'An existing registry value is unrecognized. Review it manually before remediation.' }
+                    elseif ($status.ManagedByPolicy) { 'Managed by Group Policy' }
                     elseif (-not $status.Supported) { $status.SupportReason }
                     elseif (@($deltas | Where-Object { $_.CurrentExists -and $_.CurrentType -ne $_.Type }).Count -gt 0) { 'An existing registry value has an unexpected type. Review it manually before remediation.' }
                     elseif ($requiresOverride) {
@@ -2353,7 +2435,7 @@ function Get-ChangePlan {
                     ExplicitlyRequested = $explicit
                     Preflight = $preflight
                     RequiresOverride = $requiresOverride
-                    DependencyReady = [bool]($status.Supported -and $status.Running -and (-not $status.ManagedByPolicy -or $status.PolicyValue -ne 0))
+                    DependencyReady = [bool]($status.Supported -and $status.Running -and -not $status.PolicyReadError -and -not $status.ConfigurationError -and (-not $status.ManagedByPolicy -or $status.PolicyValue -ne 0))
                     SkipReason = $skip
                 }
             }
@@ -2760,6 +2842,7 @@ function New-TextReport {
     $lines += ('  {0} / 100 ({1})' -f $Score.Score, $Score.Grade)
     $lines += ('  {0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount)
     $lines += ('  {0} of {1} applicable protections are active.' -f $running, $countable)
+    if ($Score.UnknownCount -gt 0) { $lines += ('  {0} scored protection(s) could not be verified; no points are credited, and they remain in the total.' -f $Score.UnknownCount) }
     if ($Score.ExcludedCount -gt 0) {
         $lines += ('  {0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount)
     }
@@ -2829,8 +2912,8 @@ function New-TextReport {
     $lines += '  computer while its CIS check still reports non-compliant.'
     $lines += ''
     foreach ($r in $Cis.Rows) {
-        $verdict = if ($r.Compliant) { 'PASS' } else { 'FAIL' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $verdict = if (-not $r.PolicyKnown) { 'UNKNOWN' } elseif ($r.Compliant) { 'PASS' } else { 'FAIL' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         $lines += ('  {0} {1,-9} {2,-38} policy = {3}, running = {4}' -f `
             $verdict, $r.CisId, $r.PolicyValueName, $actual, (Format-Bool $r.FeatureRunning))
         if ($r.Divergence) { $lines += ('           Deliberate difference: {0}' -f $r.Divergence) }
@@ -2881,6 +2964,8 @@ function Get-StateLabel {
         'ConfiguredNotRunning' { return @{ Text = 'Needs restart or unsupported'; Class = 'warn' } }
         'NotConfigured' { return @{ Text = 'Off'; Class = 'bad' } }
         'NotSupported' { return @{ Text = 'Not available on this PC'; Class = 'na' } }
+        'Unknown' { return @{ Text = 'Unable to verify'; Class = 'warn' } }
+        'AuditMode' { return @{ Text = 'Audit only; not enforcing'; Class = 'warn' } }
         default { return @{ Text = $State; Class = 'na' } }
     }
 }
@@ -2974,6 +3059,7 @@ a{color:inherit}
     $null = $sb.AppendLine('<h2>Applicable protection score</h2>')
     $null = $sb.AppendLine(('<p class="tiny">{0} of {1} scored controls are applicable; unsupported controls are excluded.</p>' -f $Score.ApplicableCount, $Score.TotalCount))
     $null = $sb.AppendLine(('<p class="verdict">{0} of {1} applicable protections are active on this computer.</p>' -f $running, $countable))
+    if ($Score.UnknownCount -gt 0) { $null = $sb.AppendLine(('<p class="note">{0} scored protection(s) could not be verified. No points are credited for them, and they remain in the total.</p>' -f $Score.UnknownCount)) }
     if ($Score.ExcludedCount -gt 0) {
         $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because current platform requirements are not met. They are not counted against you.</p>' -f $Score.ExcludedCount))
     }
@@ -3046,9 +3132,9 @@ a{color:inherit}
     $null = $sb.AppendLine(('<p>{0} of {1} checks pass. {2} protection(s) are actually running on this computer but still fail their CIS check for the reason above.</p>' -f $Cis.CompliantCount, $Cis.TotalCount, $Cis.RunningButNotCompliantCount))
     $null = $sb.AppendLine('<table><thead><tr><th>CIS</th><th>Requirement</th><th>Policy value</th><th>CIS result</th><th>Actually running</th></tr></thead><tbody>')
     foreach ($r in $Cis.Rows) {
-        $cls = if ($r.Compliant) { 'ok' } else { 'bad' }
-        $txt = if ($r.Compliant) { 'Pass' } else { 'Fail' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $cls = if (-not $r.PolicyKnown) { 'warn' } elseif ($r.Compliant) { 'ok' } else { 'bad' }
+        $txt = if (-not $r.PolicyKnown) { 'Unknown' } elseif ($r.Compliant) { 'Pass' } else { 'Fail' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         $runCls = if ($r.FeatureRunning) { 'ok' } else { 'na' }
         $runTxt = if ($r.FeatureRunning) { 'Yes' } else { 'No' }
         $null = $sb.AppendLine(('<tr><td>{0}<br><span class="tiny">{1}</span></td><td>{2}</td><td><code>{3}</code> = {4}</td><td><span class="badge {5}">{6}</span></td><td><span class="badge {7}">{8}</span></td></tr>' -f `
@@ -3544,12 +3630,13 @@ function Show-Summary {
     param($State, $Statuses, $Score, $SecuredCore)
 
     Write-Section 'Applicable protection score'
-    $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
+    $kind = if ($Score.UnknownCount -gt 0) { 'Warn' } elseif ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
     Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
+    if ($Score.UnknownCount -gt 0) { Write-Line ('{0} scored protection(s) could not be verified; they earn no points and remain in the total.' -f $Score.UnknownCount) 'Warn' }
     if ($Score.ExcludedCount -gt 0) {
         Write-Line ('{0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
     }
@@ -3618,8 +3705,8 @@ function Show-CisSummary {
     }
     Write-Line $Cis.Note 'Dim'
     foreach ($r in $Cis.Rows) {
-        $kind = if ($r.Compliant) { 'Good' } else { 'Bad' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $kind = if (-not $r.PolicyKnown) { 'Warn' } elseif ($r.Compliant) { 'Good' } else { 'Bad' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         Write-Line ('{0,-9} {1,-38} policy value = {2}' -f $r.CisId, $r.PolicyValueName, $actual) $kind 2
     }
 }

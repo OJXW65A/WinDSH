@@ -28,6 +28,7 @@ function New-TextReport {
     $lines += ('  {0} / 100 ({1})' -f $Score.Score, $Score.Grade)
     $lines += ('  {0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount)
     $lines += ('  {0} of {1} applicable protections are active.' -f $running, $countable)
+    if ($Score.UnknownCount -gt 0) { $lines += ('  {0} scored protection(s) could not be verified; no points are credited, and they remain in the total.' -f $Score.UnknownCount) }
     if ($Score.ExcludedCount -gt 0) {
         $lines += ('  {0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount)
     }
@@ -97,8 +98,8 @@ function New-TextReport {
     $lines += '  computer while its CIS check still reports non-compliant.'
     $lines += ''
     foreach ($r in $Cis.Rows) {
-        $verdict = if ($r.Compliant) { 'PASS' } else { 'FAIL' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $verdict = if (-not $r.PolicyKnown) { 'UNKNOWN' } elseif ($r.Compliant) { 'PASS' } else { 'FAIL' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         $lines += ('  {0} {1,-9} {2,-38} policy = {3}, running = {4}' -f `
             $verdict, $r.CisId, $r.PolicyValueName, $actual, (Format-Bool $r.FeatureRunning))
         if ($r.Divergence) { $lines += ('           Deliberate difference: {0}' -f $r.Divergence) }

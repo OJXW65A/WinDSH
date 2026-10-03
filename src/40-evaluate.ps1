@@ -15,67 +15,84 @@ function Get-ControlRunningState {
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
 
     $dg = $State.DeviceGuard
+    $servicesKnown = [bool](Get-PropertySafe $dg 'RunningKnown' $dg.Available)
     switch ($Control.DetectKey) {
         'Vbs' {
             return [pscustomobject]@{
                 Running = [bool]($dg.VbsStatusCode -eq 2)
-                RunningKnown = [bool]($null -ne $dg.VbsStatusCode)
+                RunningKnown = [bool]($dg.Available -and $null -ne $dg.VbsStatusCode)
             }
         }
         'Hvci' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $servicesKnown }
         }
         'CredentialGuard' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $servicesKnown }
         }
         'SecureLaunch' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $servicesKnown }
         }
         'KernelShadowStacks' {
             return [pscustomobject]@{
-                Running = ((Test-Contains $dg.Running 5) -or (Test-Contains $dg.Running 6))
-                RunningKnown = $dg.Available
+                Running = (Test-Contains $dg.Running 5)
+                RunningKnown = $servicesKnown
+                AuditMode = [bool]((Test-Contains $dg.Running 6) -and -not (Test-Contains $dg.Running 5))
             }
         }
         'Hvpt' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $servicesKnown }
         }
         'SmmFirmware' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $dg.Available }
+            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $servicesKnown }
         }
         'Dep' {
             return [pscustomobject]@{ Running = [bool]$State.Dep.Enabled; RunningKnown = [bool]($null -ne $State.Dep.SupportPolicy) }
         }
         default {
             # Registry-only controls have no separate running signal: configured is running.
-            return [pscustomobject]@{ Running = $null; RunningKnown = $false }
+            return [pscustomobject]@{ Running = $null; RunningKnown = $false; RegistryOnly = $true }
         }
     }
 }
 
 function Test-ControlConfigured {
     param([Parameter(Mandatory = $true)]$Control)
+    return [bool](Get-ControlConfiguration -Control $Control).Configured
+}
+
+function Get-ControlConfiguration {
+    param([Parameter(Mandatory = $true)]$Control)
     # A detection-only control has no values to write. Without this guard the loop below
     # would not execute and it would report as configured on every machine.
-    if (Get-PropertySafe $Control 'DetectionOnly' $false) { return $false }
+    if (Get-PropertySafe $Control 'DetectionOnly' $false) { return [pscustomobject]@{ Configured = $false; Error = $null } }
     $all = $true
+    $errors = @()
     foreach ($value in (ConvertTo-Array $Control.LocalValues)) {
-        $current = Get-RegValue -Path $value.Path -Name $value.Name
-        if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; break }
-        $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        if ($comparison -eq 'AtLeast') { if ([long]$current -lt [long]$value.Value) { $all = $false; break } }
-        else { if ([long]$current -ne [long]$value.Value) { $all = $false; break } }
+        try {
+            $current = Get-RegValue -Path $value.Path -Name $value.Name
+            if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; continue }
+            if ($value.ContainsKey('KnownValues') -and @($value.KnownValues) -notcontains [long]$current) {
+                $errors += ('{0} has an unrecognized value ({1}); review it manually.' -f $value.Name, $current)
+                $all = $false; continue
+            }
+            if (-not (Test-CatalogValueSatisfied -Definition $value -Current $current)) { $all = $false }
+        }
+        catch { $all = $false; $errors += ('Cannot read {0}: {1}' -f $value.Name, $_.Exception.Message) }
     }
-    return $all
+    return [pscustomobject]@{ Configured = $all; Error = $(if ($errors.Count) { $errors -join ' ' } else { $null }) }
 }
 
 function Get-ControlPolicyOverride {
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
     foreach ($pv in (ConvertTo-Array $Control.PolicyValues)) {
+        $errors = Get-PropertySafe $State.Policy 'Errors' @{}
+        if ($errors.ContainsKey($pv.Name)) {
+            return [pscustomobject]@{ Name = $pv.Name; Value = $null; Path = $State.Policy.Path; Error = $errors[$pv.Name] }
+        }
         if ($State.Policy.Values.ContainsKey($pv.Name)) {
             $value = $State.Policy.Values[$pv.Name]
             if ($null -ne $value) {
-                return [pscustomobject]@{ Name = $pv.Name; Value = $value; Path = $State.Policy.Path }
+                return [pscustomobject]@{ Name = $pv.Name; Value = $value; Path = $State.Policy.Path; Error = $null }
             }
         }
     }
@@ -171,15 +188,21 @@ function Get-ControlStatus {
     $control = Get-Control -Id $Id
     $support = Get-ControlSupport -Control $control -State $State
     $policy = Get-ControlPolicyOverride -Control $control -State $State
-    $configured = Test-ControlConfigured -Control $control
+    $configuration = Get-ControlConfiguration -Control $control
+    $configured = $configuration.Configured
     $run = Get-ControlRunningState -Control $control -State $State
 
-    $running = if ($run.RunningKnown) { [bool]$run.Running } else { $configured }
+    $registryOnly = [bool](Get-PropertySafe $run 'RegistryOnly' $false)
+    $runningKnown = if ($registryOnly) { -not [bool]$configuration.Error } else { [bool]$run.RunningKnown }
+    $running = if ($registryOnly) { [bool]($runningKnown -and $configured) } else { [bool]($runningKnown -and $run.Running) }
+    $auditMode = [bool]($runningKnown -and (Get-PropertySafe $run 'AuditMode' $false))
 
     # NOT named $state: PowerShell variable names are case-insensitive, so a local
     # $state would shadow the $State parameter and the recursive dependency call below
     # would receive this string instead of the system state object.
     $controlState = if (-not $support.Supported) { 'NotSupported' }
+                    elseif ($auditMode) { 'AuditMode' }
+                    elseif (-not $runningKnown -or (-not $running -and $configuration.Error)) { 'Unknown' }
                     elseif ($running) { 'Running' }
                     elseif ($configured) { 'ConfiguredNotRunning' }
                     else { 'NotConfigured' }
@@ -201,12 +224,15 @@ function Get-ControlStatus {
         Weight = $control.Weight
         State = $controlState
         Running = $running
+        RunningKnown = $runningKnown
         Configured = $configured
+        ConfigurationError = $configuration.Error
         Supported = $support.Supported
         SupportReason = $support.Reason
         SupportFix = $support.Fix
         ManagedByPolicy = [bool]($null -ne $policy)
         PolicyValue = if ($policy) { $policy.Value } else { $null }
+        PolicyReadError = if ($policy) { Get-PropertySafe $policy 'Error' $null } else { $null }
         BlockedBy = $blockedBy
         Cis = $control.Cis
     }
@@ -240,6 +266,8 @@ function Get-SecurityScore {
             'Running' { 1.0 }
             'ConfiguredNotRunning' { 0.5 }
             'NotConfigured' { 0.0 }
+            'Unknown' { 0.0 }
+            'AuditMode' { 0.0 }
             default { $null }
         }
         if ($null -eq $fraction) {
@@ -259,10 +287,13 @@ function Get-SecurityScore {
              elseif ($score -ge 50) { 'Fair' }
              elseif ($score -gt 0) { 'Weak' }
              else { 'Unprotected' }
+    $unknownCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.State -eq 'Unknown' }).Count
+    if ($unknownCount -gt 0) { $grade = 'Incomplete assessment' }
 
     return [pscustomobject]@{
         Score = $score
         Grade = $grade
+        UnknownCount = $unknownCount
         Earned = [math]::Round($earned, 1)
         Possible = [math]::Round($possible, 1)
         ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
@@ -321,7 +352,8 @@ function Get-CisComplianceReport {
             break
         }
 
-        $compliant = [bool]($null -ne $policyValue -and (@($accepted) -contains [int]$policyValue))
+        $policyKnown = -not [bool](Get-PropertySafe $status 'PolicyReadError' $null)
+        $compliant = [bool]($policyKnown -and $null -ne $policyValue -and (@($accepted) -contains [int]$policyValue))
 
         $rows += [pscustomobject]@{
             CisId = $control.Cis.Id
@@ -332,6 +364,7 @@ function Get-CisComplianceReport {
             Expected = $expected
             Actual = $policyValue
             Compliant = $compliant
+            PolicyKnown = $policyKnown
             FeatureRunning = [bool]($status -and $status.State -eq 'Running')
             Divergence = Get-PropertySafe $control.Cis 'Divergence' $null
         }
@@ -345,7 +378,8 @@ function Get-CisComplianceReport {
         Rows = $rows
         TotalCount = @($rows).Count
         CompliantCount = $compliantCount
-        RunningButNotCompliantCount = @($rows | Where-Object { $_.FeatureRunning -and -not $_.Compliant }).Count
+        UnknownCount = @($rows | Where-Object { -not $_.PolicyKnown }).Count
+        RunningButNotCompliantCount = @($rows | Where-Object { $_.PolicyKnown -and $_.FeatureRunning -and -not $_.Compliant }).Count
         Note = 'CIS audits the Group Policy hive. WinDSH configures local machine values and never writes Group Policy, so features can be active while these checks still report non-compliant.'
     }
 }
@@ -362,7 +396,22 @@ function Get-ControlExplanation {
 
     $verdict = $null; $action = $null; $severity = 'Info'
 
-    if ($status.State -eq 'Running') {
+    if ($status.PolicyReadError -or $status.ConfigurationError) {
+        $verdict = ('Configuration evidence for {0} could not be verified.' -f $control.Name)
+        $action = 'Review the registry or policy read error and restore access before remediation. WinDSH will skip this protection.'
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'Unknown') {
+        $verdict = ('Windows did not provide the running state of {0}.' -f $control.Name)
+        $action = 'Check access to the Windows security providers, then re-run the audit. Registry configuration alone does not prove this protection is active.'
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'AuditMode') {
+        $verdict = ('{0} is in audit mode; enforcement is not active.' -f $control.Name)
+        $action = 'Review compatibility and organization policy before enabling enforcement. Audit mode earns no enforcement points.'
+        $severity = 'Warn'
+    }
+    elseif ($status.State -eq 'Running') {
         $verdict = ('{0} is running. Nothing to do.' -f $control.Name)
         $severity = 'Good'
     }
@@ -491,6 +540,12 @@ function Get-HardwareCapabilityAdvice {
 function Get-Assessment {
     param([Parameter(Mandatory = $true)]$State)
     $statuses = @(Get-AllControlStatus -State $State)
+    $unknown = @($statuses | Where-Object State -eq 'Unknown')
+    if ($unknown.Count) { Add-Warning ('Running or configuration evidence is unavailable for {0} protection(s); the assessment is incomplete.' -f $unknown.Count) }
+    foreach ($status in $statuses) {
+        if ($status.PolicyReadError) { Add-Warning ('Cannot read policy for {0}: {1}' -f $status.Id, $status.PolicyReadError) }
+        if ($status.ConfigurationError) { Add-Warning ('Cannot verify configuration for {0}: {1}' -f $status.Id, $status.ConfigurationError) }
+    }
     return [pscustomobject]@{
         State = $State
         Statuses = $statuses

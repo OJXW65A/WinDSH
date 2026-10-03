@@ -145,7 +145,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
 $script:ToolVersion     = '2.0.0'
-$script:SchemaVersion   = '2.0'
+$script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
@@ -214,6 +214,7 @@ function Write-Section {
 
 function Add-Warning {
     param([string]$Message)
+    if ($script:Warnings -contains $Message) { return }
     $script:Warnings += $Message
     Write-Debug-Log ('WARNING: {0}' -f $Message)
 }
@@ -288,21 +289,16 @@ function New-RegistryProvider {
         Kind = 'Windows'
         GetValue = {
             param([string]$Path, [string]$Name)
-            try {
-                if (-not (Test-Path -LiteralPath $Path)) { return $null }
-                $item = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
-                return $item.$Name
-            }
-            catch { return $null }
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $null }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            if (@($key.GetValueNames()) -notcontains $Name) { return $null }
+            return $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         }
         ValueExists = {
             param([string]$Path, [string]$Name)
-            try {
-                if (-not (Test-Path -LiteralPath $Path)) { return $false }
-                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-                return [bool](@($key.GetValueNames()) -contains $Name)
-            }
-            catch { return $false }
+            if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) { return $false }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return [bool](@($key.GetValueNames()) -contains $Name)
         }
         GetKind = {
             param([string]$Path, [string]$Name)
@@ -367,6 +363,14 @@ function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
 function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
+
+function Test-CatalogValueSatisfied {
+    param([hashtable]$Definition, $Current)
+    if ($null -eq $Current) { return $false }
+    if ($Definition.ContainsKey('AcceptedValues')) { return [bool](@($Definition.AcceptedValues) -contains [long]$Current) }
+    if ($Definition.ContainsKey('Comparison') -and $Definition.Comparison -eq 'AtLeast') { return [bool]([long]$Current -ge [long]$Definition.Value) }
+    return [bool]([long]$Current -eq [long]$Definition.Value)
+}
 
 # ---------------------------------------------------------------------------
 # Environment

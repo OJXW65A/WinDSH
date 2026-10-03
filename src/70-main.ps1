@@ -7,12 +7,13 @@ function Show-Summary {
     param($State, $Statuses, $Score, $SecuredCore)
 
     Write-Section 'Applicable protection score'
-    $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
+    $kind = if ($Score.UnknownCount -gt 0) { 'Warn' } elseif ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
     Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
+    if ($Score.UnknownCount -gt 0) { Write-Line ('{0} scored protection(s) could not be verified; they earn no points and remain in the total.' -f $Score.UnknownCount) 'Warn' }
     if ($Score.ExcludedCount -gt 0) {
         Write-Line ('{0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
     }
@@ -81,8 +82,8 @@ function Show-CisSummary {
     }
     Write-Line $Cis.Note 'Dim'
     foreach ($r in $Cis.Rows) {
-        $kind = if ($r.Compliant) { 'Good' } else { 'Bad' }
-        $actual = if ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
+        $kind = if (-not $r.PolicyKnown) { 'Warn' } elseif ($r.Compliant) { 'Good' } else { 'Bad' }
+        $actual = if (-not $r.PolicyKnown) { 'unavailable' } elseif ($null -ne $r.Actual) { [string]$r.Actual } else { 'not set' }
         Write-Line ('{0,-9} {1,-38} policy value = {2}' -f $r.CisId, $r.PolicyValueName, $actual) $kind 2
     }
 }
