@@ -11,16 +11,21 @@ comparison with CIS Device Guard policy settings.
 
 ## Download
 
-These are the only two files needed to run WinDSH. Download both:
+**[Download WinDSH.zip](https://github.com/OJXW65A/WinDSH/releases/latest/download/WinDSH.zip)**
 
-- [Download Run-WinDSH-AsAdmin.bat](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/Run-WinDSH-AsAdmin.bat) — launcher that requests Administrator rights.
-- [Download WinDSH.ps1](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/WinDSH.ps1) — the complete WinDSH application.
+The ZIP contains only the two files needed to run WinDSH:
 
-Save both files in the **same folder**, then double-click **Run-WinDSH-AsAdmin.bat**
-and approve the administrator prompt.
+- `Run-WinDSH-AsAdmin.bat` — launcher that requests Administrator rights.
+- `WinDSH.ps1` — the complete WinDSH application.
 
-If a link opens as text, right-click the link and choose **Save link as...**.
-Keep the original `.bat` and `.ps1` file extensions.
+Right-click the downloaded ZIP and choose **Extract All**, then open the extracted
+folder, double-click **Run-WinDSH-AsAdmin.bat**, and approve the administrator prompt.
+Keep both extracted files together in the same folder.
+
+The single-file download will be available when the next release is published.
+Until then, download [Run-WinDSH-AsAdmin.bat](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/Run-WinDSH-AsAdmin.bat)
+and [WinDSH.ps1](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/WinDSH.ps1) separately
+into the same folder. If a link opens as text, right-click it and choose **Save link as...**.
 
 ## Requirements
 

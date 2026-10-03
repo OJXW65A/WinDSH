@@ -96,7 +96,7 @@ jobs:
           $stage = "$env:GITHUB_WORKSPACE\dist\WinDSH-v$version"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
-          # Exactly what an end user needs, nothing else.
+          # Full bundle with documentation, licensing, and security information.
           $payload = @(
               'WinDSH.ps1'
               'Run-WinDSH-AsAdmin.bat'
@@ -120,6 +120,10 @@ jobs:
           Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
           Write-Host "Created: $zip"
 
+          # Stable asset name lets the README link to the latest public download.
+          # This ZIP contains only the launcher and the application at its root.
+          .\build\Build-Download.ps1 -OutputPath "$env:GITHUB_WORKSPACE\dist\WinDSH.zip"
+
           "stage=$stage" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "zip=$zip"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -136,9 +140,10 @@ jobs:
               $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
               $lines += ('{0}  {1}' -f $hash, $file.Name)
           }
-          $zipFile = Get-Item '${{ steps.stage.outputs.zip }}'
-          $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipFile.FullName).Hash.ToLowerInvariant()
-          $lines += ('{0}  {1}' -f $zipHash, $zipFile.Name)
+          foreach ($zipFile in (Get-ChildItem $dist -Filter '*.zip' -File | Sort-Object Name)) {
+              $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipFile.FullName).Hash.ToLowerInvariant()
+              $lines += ('{0}  {1}' -f $zipHash, $zipFile.Name)
+          }
 
           # LF endings so the file verifies cleanly with sha256sum on any platform.
           [IO.File]::WriteAllText($sumsPath, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
@@ -194,6 +199,13 @@ jobs:
             ## WinDSH ${{ steps.version.outputs.tag }}
 
             Built by GitHub Actions from this repository. See `CHANGELOG.md` for changes.
+
+            ### Download and run
+
+            Download **WinDSH.zip**, extract all files, then double-click
+            **Run-WinDSH-AsAdmin.bat** in the extracted folder and approve the
+            administrator prompt. The ZIP contains only the launcher and **WinDSH.ps1**.
+            The versioned ZIP also includes documentation and licensing information.
 
             ### Verifying this download
 
