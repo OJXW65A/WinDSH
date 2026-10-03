@@ -1,5 +1,11 @@
 # WinDSH changelog
 
+## Unreleased — public download
+
+- Add `WinDSH.zip` to release assets, containing only `Run-WinDSH-AsAdmin.bat` and
+  `WinDSH.ps1`, with SHA-256 checksums and build provenance. Document extraction
+  and launch steps in the public download section.
+
 ## Unreleased — audit safety fixes
 
 - Separate safe-set intent from explicit control selection. HVCI preflight fails closed
