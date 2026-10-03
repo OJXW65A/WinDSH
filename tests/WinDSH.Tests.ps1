@@ -16,7 +16,7 @@ BeforeAll {
         $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     }
     else {
-        $PowerShellExe = (Get-Command pwsh.exe -ErrorAction Stop).Source
+        $PowerShellExe = (Get-Process -Id $PID).Path
     }
 
     function Invoke-WinDSHChild {

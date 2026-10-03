@@ -15,8 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PSSCRIPTANALYZER_VERSION: '1.24.0'
-  PESTER_VERSION: '5.9.1'
   ACTIONLINT_VERSION: '1.7.7'
   # The release's own published checksum for the linux_amd64 archive. Pinning the
   # hash as well as the tag means a re-published release cannot change what CI runs.
@@ -32,7 +30,7 @@ jobs:
     name: Workflow files are valid
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install actionlint
         run: |
@@ -64,7 +62,7 @@ jobs:
     name: Built file is current
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Verify WinDSH.ps1 matches src/
         shell: powershell
@@ -105,7 +103,7 @@ jobs:
             shell: pwsh
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Show PowerShell version
         run: $PSVersionTable | Format-List
@@ -130,12 +128,12 @@ jobs:
 
       - name: Install PSScriptAnalyzer
         run: |
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Install-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION `
-              -Scope CurrentUser -Force -Repository PSGallery
+          .\build\Install-CIDependencies.ps1 -Name PSScriptAnalyzer -Destination "$env:RUNNER_TEMP\windsh-verified-modules"
 
       - name: Run PSScriptAnalyzer
         run: |
+          $pin = (Get-Content -Raw .\.github\psgallery-lock.json | ConvertFrom-Json).PSScriptAnalyzer
+          Import-Module "$env:RUNNER_TEMP\windsh-verified-modules\PSScriptAnalyzer\$($pin.version)\PSScriptAnalyzer.psd1" -Force
           # Analyse src/ rather than the generated file, so findings point at real source.
           $results = @(Invoke-ScriptAnalyzer -Path "$env:GITHUB_WORKSPACE\src" -Recurse) +
                      @(Invoke-ScriptAnalyzer -Path "$env:GITHUB_WORKSPACE\build")
@@ -157,13 +155,12 @@ jobs:
 
       - name: Install Pester
         run: |
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Install-Module Pester -RequiredVersion $env:PESTER_VERSION `
-              -Scope CurrentUser -Force -Repository PSGallery
+          .\build\Install-CIDependencies.ps1 -Name Pester -Destination "$env:RUNNER_TEMP\windsh-verified-modules"
 
       - name: Run Pester tests
         run: |
-          Import-Module Pester -RequiredVersion $env:PESTER_VERSION -Force
+          $pin = (Get-Content -Raw .\.github\psgallery-lock.json | ConvertFrom-Json).Pester
+          Import-Module "$env:RUNNER_TEMP\windsh-verified-modules\Pester\$($pin.version)\Pester.psd1" -Force
           $configuration = New-PesterConfiguration
           $configuration.Run.Path = "$env:GITHUB_WORKSPACE\tests"
           $configuration.Run.PassThru = $true
@@ -181,7 +178,7 @@ jobs:
     name: Live audit smoke test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Real audit, all three report formats
         shell: powershell

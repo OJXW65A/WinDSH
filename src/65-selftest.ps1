@@ -40,6 +40,9 @@ function New-SyntheticState {
 }
 
 function Invoke-SelfTest {
+    # Scoped event provider: self-tests never query the real host's compatibility log.
+    $ciEvidence = [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null }
+    function Get-CodeIntegrityEvents { param($EventIds, $LookbackDays) return $ciEvidence }
     $pass = 0; $fail = 0
     function Assert-That {
         param([string]$Name, [bool]$Condition, [string]$Detail = '')
@@ -120,7 +123,7 @@ function Invoke-SelfTest {
     Assert-That 'Every value needs changing on a clean machine' (@($plan | Where-Object { -not $_.NeedsChange }).Count -eq 0)
 
     $journal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-selftest-{0}.jsonl' -f ([Guid]::NewGuid().ToString('N').Substring(0, 8)))
-    $env:WINDSH_JOURNAL_PATH = $journal
+    $script:TestJournalPath = $journal
     try {
         $applied = Invoke-ControlApply -Ids @('hvci') -State $clean
         Assert-That 'Apply writes the planned values' ($applied.ChangeCount -eq @($plan).Count) ('changes={0}' -f $applied.ChangeCount)
@@ -134,6 +137,116 @@ function Invoke-SelfTest {
         $revert = Invoke-ControlRevert -RunId $applied.RunId
         Assert-That 'Revert restores every journalled value' ($revert.ChangeCount -eq $applied.ChangeCount) ('reverted={0}' -f $revert.ChangeCount)
         Assert-That 'Values that never existed are removed, not zeroed' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+
+        $closedRejected = $false
+        try { [void](Invoke-ControlRevert -RunId $applied.RunId) } catch { $closedRejected = $true }
+        Assert-That 'A completed run cannot be reverted twice' $closedRejected
+        Assert-That 'Completed runs are excluded from default rollback selection' (@(Get-JournalRuns).Count -eq 0)
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegCiConfig + '|VulnerableDriverBlocklistEnable') = 0 })
+        $conflictApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 2
+        $conflictRevert = Invoke-ControlRevert -RunId $conflictApply.RunId
+        Assert-That 'Rollback preserves later administrator changes' ((Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 2 -and $conflictRevert.Conflicts.Count -eq 1)
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'String' '1'
+        $typeRevert = Invoke-ControlRevert -RunId $conflictApply.RunId
+        Assert-That 'Rollback detects a registry type conflict' ($typeRevert.Conflicts.Count -eq 1)
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+        $retryRevert = Invoke-ControlRevert -RunId $conflictApply.RunId
+        Assert-That 'A conflicted entry can be retried when expected state is restored' ($retryRevert.ChangeCount -eq 1 -and (Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 0)
+
+        # An intent without a completion marker is ambiguous, even when the live
+        # value happens to equal AfterValue. It must never erase a later change.
+        $pendingId = 'selftest-pending'
+        $pending = [pscustomobject]@{ RecordType = 'Change'; ChangeId = 'pending-write'; RunId = $pendingId; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = 0; AfterValue = 1 }
+        Write-JournalEntry $pending
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 2
+        $pendingRevert = Invoke-ControlRevert -RunId $pendingId
+        Assert-That 'Journal-before-write cannot overwrite an unrelated later value' ($pendingRevert.ChangeCount -eq 0 -and (Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 2)
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+        $ambiguousRevert = Invoke-ControlRevert -RunId $pendingId
+        Assert-That 'Unconfirmed writes require manual review even if the value matches' ($ambiguousRevert.ChangeCount -eq 0 -and $ambiguousRevert.Conflicts.Count -eq 1)
+
+        # Legacy v2 journals stay usable, but are subject to conflict and catalog checks.
+        $legacyEntry = [pscustomobject]@{ RunId = 'selftest-legacy'; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = 0; AfterValue = 1 }
+        Write-JournalEntry $legacyEntry
+        $legacyRevert = Invoke-ControlRevert -RunId $legacyEntry.RunId
+        Assert-That 'Legacy journal entries can be safely reverted' ($legacyRevert.ChangeCount -eq 1 -and (Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 0)
+
+        # Partial revert recovery never repeats already-restored registry writes.
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $partialApply = Invoke-ControlApply -Ids @('vbs') -State $clean
+        & $script:Registry.SetValue $script:RegDeviceGuard 'Locked' 'DWord' 2
+        $partialRevert = Invoke-ControlRevert -RunId $partialApply.RunId
+        Assert-That 'Partial rollback restores matching entries and reports conflicts' ($partialRevert.ChangeCount -eq 1 -and $partialRevert.Conflicts.Count -eq 1)
+        & $script:Registry.SetValue $script:RegDeviceGuard 'EnableVirtualizationBasedSecurity' 'DWord' 2
+        & $script:Registry.SetValue $script:RegDeviceGuard 'Locked' 'DWord' 0
+        $finishRevert = Invoke-ControlRevert -RunId $partialApply.RunId
+        Assert-That 'Retrying a partial revert never repeats completed entries' ($finishRevert.ChangeCount -eq 1 -and (Get-RegValue $script:RegDeviceGuard 'EnableVirtualizationBasedSecurity') -eq 2)
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $crashApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
+        $crashChange = @(Get-JournalChanges -Records @(Get-Journal -RunId $crashApply.RunId))[0]
+        Write-JournalMarker -RunId $crashApply.RunId -RecordType 'RevertStarted' -ChangeId $crashChange.Id
+        & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
+        $crashRevert = Invoke-ControlRevert -RunId $crashApply.RunId
+        Assert-That 'An interrupted revert is finalized without rewriting registry state' ($crashRevert.ChangeCount -eq 0 -and $crashRevert.RecoveredCount -eq 1)
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegCiConfig + '|VulnerableDriverBlocklistEnable') = 2 })
+        foreach ($pair in @(@(0, 1), @(1, 2))) {
+            Write-JournalEntry ([pscustomobject]@{ RunId = 'selftest-repeated-value'; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = $pair[0]; AfterValue = $pair[1] })
+        }
+        # Catalog validation rejects arbitrary AfterValue, even for a known path.
+        $badAfterRejected = $false
+        try { [void](Invoke-ControlRevert -RunId 'selftest-repeated-value') } catch { $badAfterRejected = $true }
+        Assert-That 'Rollback validates recorded target values against the catalog' $badAfterRejected
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $baseSet = $script:Registry.SetValue
+        $failureCounter = @{ Count = 0 }
+        $script:Registry.SetValue = {
+            param($Path, $Name, $Type, $Value)
+            $failureCounter.Count++
+            if ($failureCounter.Count -eq 2) { throw 'Synthetic write failure' }
+            & $baseSet $Path $Name $Type $Value
+        }.GetNewClosure()
+        $partialRejected = $false
+        try { [void](Invoke-ControlApply -Ids @('vbs') -State $clean -RunId 'selftest-partial-apply') } catch { $partialRejected = $true }
+        $script:Registry.SetValue = $baseSet
+        $partialWriteRevert = Invoke-ControlRevert -RunId 'selftest-partial-apply'
+        Assert-That 'Partial apply records completed writes and leaves pending writes untouched' ($partialRejected -and $partialWriteRevert.ChangeCount -eq 1 -and $partialWriteRevert.Conflicts.Count -eq 1)
+
+        # A process holding the lock excludes other apply/revert operations.
+        $heldLock = Enter-JournalLock
+        $lockedOut = $false
+        try { [void](Invoke-ControlApply -Ids @('vbs') -State $clean) } catch { $lockedOut = $true }
+        finally { $heldLock.Dispose() }
+        Assert-That 'Concurrent change operations are rejected before writing' $lockedOut
+
+        $validJournal = [IO.File]::ReadAllText($journal)
+        try {
+            [IO.File]::AppendAllText($journal, '{broken' + "`n")
+            $corruptRejected = $false
+            try { [void](Invoke-ControlRevert -RunId $pendingId) } catch { $corruptRejected = $true }
+            Assert-That 'Malformed terminated journal records block rollback' $corruptRejected
+            [IO.File]::WriteAllText($journal, $validJournal + '{torn')
+            $repairLock = Enter-JournalLock
+            $repairLock.Dispose()
+            Assert-That 'A torn journal tail is repaired before subsequent appends' ([IO.File]::ReadAllText($journal) -eq $validJournal)
+        }
+        finally { [IO.File]::WriteAllText($journal, $validJournal) }
+        $malicious = [pscustomobject]@{ RunId = 'selftest-invalid'; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegPolicyDG; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = 0; AfterValue = 1 }
+        Write-JournalEntry $malicious
+        $invalidRejected = $false
+        try { [void](Invoke-ControlRevert -RunId $malicious.RunId) } catch { $invalidRejected = $true }
+        Assert-That 'Journal content cannot authorize writes outside the catalog' $invalidRejected
+
+        $priorOverride = $env:WINDSH_JOURNAL_PATH
+        try {
+            $env:WINDSH_JOURNAL_PATH = 'untrusted-environment-path'
+            Assert-That 'Inherited journal environment overrides are ignored' ((Get-JournalPath) -eq $journal)
+        }
+        finally { $env:WINDSH_JOURNAL_PATH = $priorOverride }
 
         # A stronger platform security level must survive.
         Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegDeviceGuard + '|RequirePlatformSecurityFeatures') = 3 })
@@ -150,8 +263,8 @@ function Invoke-SelfTest {
         Assert-That 'The unmanaged dependency still applies' ((Get-RegValue -Path $script:RegDeviceGuard -Name 'EnableVirtualizationBasedSecurity') -eq 1)
     }
     finally {
-        if (Test-Path -LiteralPath $journal) { Remove-Item -LiteralPath $journal -Force }
-        Remove-Item Env:\WINDSH_JOURNAL_PATH -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $journal, ($journal + '.lock') -Force -ErrorAction SilentlyContinue
+        $script:TestJournalPath = $null
         Set-RegistryProvider (New-InMemoryRegistryProvider)
     }
 
@@ -167,6 +280,29 @@ function Invoke-SelfTest {
     $depOff = New-SyntheticState
     $depOff.Dep = [pscustomobject]@{ SupportPolicy = 0; Available = $true; Text = 'Always off'; Enabled = $false }
     Assert-That 'DEP off is not reported as configured' ((Get-ControlStatus -Id 'dep' -State $depOff).State -ne 'Running')
+    $depLegacy = New-SyntheticState
+    $depLegacy.Firmware.IsUefiConfirmed = $false
+    $depLegacy.Virtualization.FirmwareEnabled = $false
+    $depLegacy.HypervisorLaunch.BlocksVbs = $true
+    $depLegacy.Computer.Is64Bit = $false
+    Assert-That 'DEP does not inherit VBS platform prerequisites' ((Get-ControlStatus -Id 'dep' -State $depLegacy).State -eq 'Running')
+
+    Set-RegistryProvider (New-InMemoryRegistryProvider)
+    $assessmentBefore = Get-Assessment -State $clean
+    & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+    $assessmentAfter = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh recalculates statuses and score together' ($assessmentAfter.Score.Score -gt $assessmentBefore.Score.Score -and @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' -and $_.Running }).Count -eq 1)
+    $freshExplain = @($assessmentAfter.Explanations | Where-Object { $_.Id -eq 'driver-blocklist' })[0]
+    Assert-That 'Assessment explanations use the same refreshed status snapshot' ($freshExplain.Status -eq @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' })[0])
+    $clean.DeviceGuard.Running = @(2, 3)
+    $clean.DeviceGuard.VbsStatusCode = 2
+    $clean.DeviceGuard.HasSmmMitigations = $true
+    $coreAssessment = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh updates Secured-core and CIS derived state' ($coreAssessment.SecuredCore.Qualifies -and @($coreAssessment.Cis.Rows | Where-Object { $_.ControlId -eq 'hvci' -and $_.FeatureRunning }).Count -eq 1)
+    $clean.DeviceGuard.Running = @()
+    $clean.DeviceGuard.VbsStatusCode = 0
+    $clean.DeviceGuard.HasSmmMitigations = $false
+    & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
 
     $hvptState = New-SyntheticState
     $hvptState.DeviceGuard.Running = @(7)
@@ -183,6 +319,33 @@ function Invoke-SelfTest {
     Assert-That 'Memory Integrity declares a driver pre-flight check' ($null -ne $hvciControl.Preflight)
     Assert-That 'Pre-flight watches Event ID 3087' (@($hvciControl.Preflight.EventIds) -contains 3087)
     Assert-That 'Pre-flight blocks the safe set when tripped' ([bool]$hvciControl.Preflight.BlocksSafeSet)
+
+    $ciEvidence.EventCount = 1
+    $riskPlan = @(Get-ChangePlan -Ids $script:SafeControlSet -State $clean)
+    Assert-That 'Safe-set preview includes HVCI preflight blockers' (@($riskPlan | Where-Object { $_.ControlId -eq 'hvci' -and $_.SkipReason }).Count -eq 2)
+    $riskJournal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-preflight-{0}.jsonl' -f [Guid]::NewGuid())
+    $script:TestJournalPath = $riskJournal
+    try {
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $safeRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'EnableAllSafe skips HVCI when 3087 evidence is present' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        Assert-That 'Safe-set apply reports the same preflight blocker as preview' (@($safeRisk.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
+        $explicitRisk = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
+        Assert-That 'Explicit unattended HVCI cannot bypass a typed override' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $ciEvidence.EventCount = 0
+        $ciEvidence.Queried = $false
+        $unknownRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'Unknown compatibility fails closed for the safe set' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $depRisk = @(Get-ChangePlan -Ids @('kernel-shadow-stacks') -State $clean)
+        Assert-That 'A preflight-blocked dependency also blocks shadow stacks' (@($depRisk | Where-Object { $_.ControlId -eq 'kernel-shadow-stacks' -and $_.SkipReason }).Count -eq 1)
+    }
+    finally {
+        $ciEvidence.Queried = $true
+        $ciEvidence.EventCount = 0
+        Remove-Item -LiteralPath $riskJournal, ($riskJournal + '.lock') -Force -ErrorAction SilentlyContinue
+        $script:TestJournalPath = $null
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+    }
 
     # --- firmware guidance (restored from v1.6.0) ---
     $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
@@ -213,6 +376,7 @@ function Invoke-SelfTest {
     $previousUnattended = $script:Unattended
     $script:Unattended = $true
     Assert-That 'Unattended runs never block on a confirmation prompt' (Confirm-Action 'This must not prompt')
+    Assert-That 'Unattended consent does not satisfy typed safety confirmation' (-not (Confirm-Action 'Risky' -RequireTyped 'hvci'))
     $script:Unattended = $previousUnattended
 
     # --- virtual machine assessment (restored from v1.6.0) ---
@@ -231,10 +395,14 @@ function Invoke-SelfTest {
 
     $hostile = Get-RelaunchArgumentList -Bound @{ ReportDirectory = 'C:\x" -Enable credential-guard "' }
     Assert-That 'Embedded quotes cannot inject a new argument' (-not ($hostile -contains '-Enable')) ($hostile -join ' ')
-    Assert-That 'Embedded quotes are doubled, not passed through' (@($hostile | Where-Object { $_ -match '""' }).Count -eq 1) ($hostile -join ' ')
+    Assert-That 'Embedded quotes use native argument escaping' (@($hostile | Where-Object { $_.Contains('\"') }).Count -eq 1) ($hostile -join ' ')
 
     $empty = Get-RelaunchArgumentList -Bound @{ AutoReboot = [switch]$false }
     Assert-That 'An unset switch is not relaunched' (@($empty).Count -eq 0) ('count={0}' -f @($empty).Count)
+    $trailing = ConvertTo-NativeArgument 'C:\Reports\'
+    Assert-That 'Trailing path backslashes cannot consume the closing argument quote' ($trailing -eq '"C:\Reports\\"')
+    $arrayRelaunch = Get-RelaunchArgumentList -Bound @{ Enable = @('hvci', 'driver-blocklist') }
+    Assert-That 'Multiple Enable controls survive native File argument binding' ($arrayRelaunch -contains '"hvci,driver-blocklist"')
 
     # --- CIS comparison ---
     $cisState = New-SyntheticState
@@ -275,7 +443,7 @@ function Invoke-SelfTest {
     $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
     Assert-That 'Plain-text report is produced' ($textReport.Length -gt 1500) ('{0} bytes' -f $textReport.Length)
     Assert-That 'Text report states the CIS hive caveat' ($textReport -match 'Group Policy hive')
-    Assert-That 'Text report includes the score' ($textReport -match 'SECURITY SCORE')
+    Assert-That 'Text report includes the score' ($textReport -match 'APPLICABLE PROTECTION SCORE')
     Assert-That 'Text report includes DEP' ($textReport -match 'DEP')
 
     Set-RegistryProvider (New-RegistryProvider)

@@ -330,7 +330,7 @@ function Get-CodeIntegrityEvents {
         }
         catch {
             # "No events were found" is a normal, healthy outcome, not an error.
-            if ($_.Exception.Message -match 'No events were found') { $result.Queried = $true; $result.LogAvailable = $true }
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $result.Queried = $true; $result.LogAvailable = $true }
             else { $result.Error = $_.Exception.Message; Write-DebugError ('Read {0}' -f $log) $_ }
         }
     }

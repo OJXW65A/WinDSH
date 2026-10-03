@@ -6,14 +6,15 @@
 function Show-Summary {
     param($State, $Statuses, $Score, $SecuredCore)
 
-    Write-Section 'Security score'
+    Write-Section 'Applicable protection score'
     $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
+    Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
     if ($Score.ExcludedCount -gt 0) {
-        Write-Line ('{0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
+        Write-Line ('{0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
     }
 
     if ($State.HypervisorLaunch.BlocksVbs) {
@@ -191,6 +192,7 @@ function Write-RmmOutput {
         warnings = @($script:Warnings).Count
         exitCode = $script:ExitCode
     }
+    $script:RmmOutputWritten = $true
     Write-Output ($payload | ConvertTo-Json -Depth 8 -Compress)
 }
 
@@ -209,7 +211,7 @@ function Wait-ForKey {
 function Show-Menu {
     param($Statuses, $Score)
     Write-Host ''
-    Write-Line ('{0} {1}   security score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
+    Write-Line ('{0} {1}   applicable protection score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
     Write-Host ''
     Write-Line '  [1] Re-check this computer' 'Plain'
     Write-Line '  [2] Fix what can be fixed safely' 'Plain'
@@ -285,28 +287,25 @@ function Show-Explanation {
 function Invoke-Interactive {
     param($State)
 
-    $statuses = Get-AllControlStatus -State $State
-    $score = Get-SecurityScore -Statuses $statuses
-    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
+    $assessment = Get-Assessment -State $State
 
-    Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-    Show-NextSteps -Explanations $explanations
+    Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+    Show-NextSteps -Explanations $assessment.Explanations
 
+    $changed = $false
     while ($true) {
-        Show-Menu -Statuses $statuses -Score $score
+        Show-Menu -Statuses $assessment.Statuses -Score $assessment.Score
         $choice = Read-Choice '12345Q'
 
         if ($choice -eq 'Q') {
             # No second full audit when nothing changed: the state we have is still true.
-            if (@($script:AppliedChanges).Count -eq 0) {
+            if (-not $changed) {
                 Write-Line ''
                 Write-Line 'No changes were made to this computer.' 'Dim'
                 if ($State.Restart.Pending) { Write-Line 'Note: Windows has its own restart pending, unrelated to this tool.' 'Dim' }
                 return
             }
-            $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+            $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
             foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
             if ($script:RestartRequired) {
                 Write-Line ''
@@ -318,16 +317,13 @@ function Invoke-Interactive {
         switch ($choice) {
             '1' {
                 $State = Get-SystemState -Volatile
-                $statuses = Get-AllControlStatus -State $State
-                $score = Get-SecurityScore -Statuses $statuses
-                $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-                $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-                $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
-                Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-                Show-NextSteps -Explanations $explanations
+                $assessment = Get-Assessment -State $State
+                Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+                Show-NextSteps -Explanations $assessment.Explanations
             }
             '2' {
                 $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $State
+                if ($result.ChangeCount -gt 0) { $changed = $true }
                 Write-Section 'Result'
                 if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                 foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
@@ -337,8 +333,7 @@ function Invoke-Interactive {
                     Write-Line ('Restart required. Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info'
                 }
                 $State = Get-SystemState -Volatile
-                $statuses = Get-AllControlStatus -State $State
-                $score = Get-SecurityScore -Statuses $statuses
+                $assessment = Get-Assessment -State $State
             }
             '3' {
                 $id = Select-ControlInteractive
@@ -355,7 +350,7 @@ function Invoke-Interactive {
                 $script:HtmlSelected = [bool]($fmt -eq '1' -or $fmt -eq '4')
                 $script:TextSelected = [bool]($fmt -eq '2' -or $fmt -eq '4')
                 $script:JsonSelected = [bool]($fmt -eq '3' -or $fmt -eq '4')
-                $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
+                $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
                 foreach ($p in $paths) { Write-Line ('Saved: {0}' -f $p) 'Good' }
             }
             '5' {
@@ -366,14 +361,14 @@ function Invoke-Interactive {
                     'B' {
                         $id = Select-ControlInteractive
                         if ($id) {
-                            $result = Invoke-ControlApply -Ids @($id) -State $State
+                            $result = Invoke-ControlApply -Ids @($id) -State $State -ExplicitIds @($id)
+                            if ($result.ChangeCount -gt 0) { $changed = $true }
                             Write-Section 'Result'
                             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
                             foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
                             $State = Get-SystemState -Volatile
-                            $statuses = Get-AllControlStatus -State $State
-                            $score = Get-SecurityScore -Statuses $statuses
+                            $assessment = Get-Assessment -State $State
                         }
                     }
                     'C' {
@@ -385,14 +380,15 @@ function Invoke-Interactive {
                             $rid = Read-Host 'Run id to undo (blank to cancel)'
                             if (-not [string]::IsNullOrWhiteSpace($rid)) {
                                 $rev = Invoke-ControlRevert -RunId $rid.Trim()
+                                if ($rev.ChangeCount -gt 0) { $changed = $true }
+                                foreach ($conflict in $rev.Conflicts) { Write-Line $conflict.Reason 'Warn'; Add-Warning $conflict.Reason }
                                 Write-Line ('Reverted {0} change(s).' -f $rev.ChangeCount) 'Good'
                                 $State = Get-SystemState -Volatile
-                                $statuses = Get-AllControlStatus -State $State
-                                $score = Get-SecurityScore -Statuses $statuses
+                                $assessment = Get-Assessment -State $State
                             }
                         }
                     }
-                    'D' { Show-CisSummary -Cis $cis }
+                    'D' { Show-CisSummary -Cis $assessment.Cis }
                     'E' {
                         try { Start-Process 'windowsdefender://coreisolation' | Out-Null; Write-Line 'Opened Windows Security.' 'Good' }
                         catch { Write-Line 'Could not open Windows Security.' 'Warn' }
@@ -441,6 +437,20 @@ function Invoke-Main {
         $script:ExitCode = 1; return
     }
 
+    if (($EnableAllSafe -and $Enable) -or ($Revert -and ($EnableAllSafe -or $Enable)) -or ($Explain -and ($EnableAllSafe -or $Enable -or $Revert)) -or ($RunId -and -not $Revert)) {
+        Write-Line 'Use one change mode at a time; -RunId requires -Revert and -Explain cannot be combined with changes.' 'Bad'
+        $script:ExitCode = 1; return
+    }
+    if ($Enable) { $Enable = @($Enable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    foreach ($controlId in (ConvertTo-Array $Enable)) {
+        if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+        if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+    }
+    if ($Explain -and -not (Test-Contains (Get-ControlIds) $Explain.Trim().ToLowerInvariant())) {
+        Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
+        $script:ExitCode = 1; return
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($DebugLogPath)) {
         $script:DebugEnabled = $true
         $script:DebugPath = $DebugLogPath
@@ -450,7 +460,7 @@ function Invoke-Main {
     if (-not (Test-IsElevated)) {
         # Try to elevate ourselves first. Telling a non-technical user to "run as
         # administrator" and exiting is not a workable instruction for this audience.
-        if (Request-Elevation -Bound $PSBoundParameters) { return }
+        if (Request-Elevation -Bound $script:InvocationParameters) { return }
         Write-Line 'WinDSH needs to run as Administrator to read platform security state.' 'Bad'
         Write-Line 'Right-click PowerShell, choose "Run as administrator", then run it again.' 'Info'
         Write-Line 'Or use Run-WinDSH-AsAdmin.bat, which requests elevation for you.' 'Info'
@@ -480,86 +490,113 @@ function Invoke-Main {
         $script:ExitCode = 0; return
     }
 
+    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Revert -or $Rmm)
+    $script:Unattended = $unattended
     if ($Revert) {
         if (-not $script:RemediationAllowed) { Write-Line 'Revert is disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
         try {
             $result = Invoke-ControlRevert -RunId $RunId
             Write-Section 'Revert'
             foreach ($r in $result.Reverted) { Write-Line ('{0}\{1} restored to {2}' -f $r.Path, $r.Name, $r.RestoredTo) 'Good' 2 }
-            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Good'
-            $script:ExitCode = $(if ($result.RestartRequired) { 3010 } else { 0 }); return
+            foreach ($conflict in $result.Conflicts) {
+                $message = '{0}\{1}: {2}' -f $conflict.Path, $conflict.Name, $conflict.Reason
+                Write-Line $message 'Warn'; Add-Warning $message
+            }
+            if ($result.Conflicts.Count -gt 0) { $script:ExitCode = 5 }
+            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Info'
         }
         catch {
-            Write-Line ('Revert failed: {0}' -f $_.Exception.Message) 'Bad'
-            $script:ExitCode = 5; return
+            Add-Warning ('Revert failed: {0}' -f $_.Exception.Message)
+            $script:ExitCode = 5
         }
+        $State = Get-SystemState -Volatile
     }
-
-    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Rmm)
-    # Confirm-Action reads this: prompts are interactive-only, because a prompt on an
-    # unattended run would hang waiting for a user who is not there.
-    $script:Unattended = $unattended
-
-    if ($EnableAllSafe -or $Enable) {
+    elseif ($EnableAllSafe -or $Enable) {
         if (-not $script:RemediationAllowed) { Write-Line 'Changes are disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
         $ids = if ($Enable) { @($Enable) } else { $script:SafeControlSet }
-        foreach ($id in $ids) {
-            if (-not (Test-Contains (Get-ControlIds) $id)) { Write-Line ('Unknown control "{0}".' -f $id) 'Bad'; $script:ExitCode = 1; return }
-        }
-
-        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State) }
+        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State -ExplicitIds @($Enable)) }
         else {
-            $result = Invoke-ControlApply -Ids $ids -State $State
-            Write-Section 'Changes'
-            if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
-            foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
-            foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
-            if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            try {
+                $result = Invoke-ControlApply -Ids $ids -State $State -ExplicitIds @($Enable)
+                Write-Section 'Changes'
+                if ($result.ChangeCount -eq 0 -and $result.Skipped.Count -eq 0) { Write-Line 'No changes were needed.' 'Good' }
+                elseif ($result.ChangeCount -eq 0) { Write-Line 'No changes were made; see the skipped protections below.' 'Warn' }
+                foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
+                foreach ($skip in $result.Skipped) {
+                    $message = 'Skipped {0}: {1}' -f $skip.ControlName, $skip.Reason
+                    Write-Line $message 'Warn'; Add-Warning $message
+                }
+                if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            }
+            catch {
+                Add-Warning ('Remediation stopped: {0}' -f $_.Exception.Message)
+                $script:ExitCode = 1
+            }
             $State = Get-SystemState -Volatile
         }
     }
 
-    $statuses = Get-AllControlStatus -State $State
-    $score = Get-SecurityScore -Statuses $statuses
-    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
-
+    $assessment = Get-Assessment -State $State
     if ($Rmm) {
-        if ($script:RestartRequired) { $script:ExitCode = 3010 }
-        Write-RmmOutput -State $State -Statuses $statuses -Score $score -Cis $cis
-        $script:ExitCode = $script:ExitCode; return
+        # Automation writes files only when a format was explicitly selected.
+        if ($HtmlReport -or $JsonReport -or $TextReport) {
+            [void](Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
+        }
     }
-
-    if ($unattended) {
-        Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-        Show-NextSteps -Explanations $explanations
-        if ($Advanced) { Show-CisSummary -Cis $cis }
-        $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+    elseif ($unattended) {
+        Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+        Show-NextSteps -Explanations $assessment.Explanations
+        if ($Advanced) { Show-CisSummary -Cis $assessment.Cis }
+        $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
         foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
     }
-    else {
-        Invoke-Interactive -State $State
-    }
+    else { Invoke-Interactive -State $State }
 
+    $script:ExitCode = Get-FinalExitCode
+    if ($AutoReboot -and $script:ExitCode -eq 3010 -and -not $WhatIfPreference) {
+        try { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force -ErrorAction Stop }
+        catch { Add-Warning ('Automatic restart failed: {0}' -f $_.Exception.Message); $script:ExitCode = 1 }
+    }
+    if ($Rmm) {
+        Write-RmmOutput -State $State -Statuses $assessment.Statuses -Score $assessment.Score -Cis $assessment.Cis
+        return
+    }
     foreach ($w in $script:Warnings) { Write-Line $w 'Warn' }
-
-    if ($unattended -and -not $Rmm) {
-        $final = if ($script:RestartRequired) { 3010 } elseif ($script:ExitCode -ne 0) { $script:ExitCode } elseif (@($script:Warnings).Count -gt 0) { 2 } else { 0 }
+    if ($unattended) {
         Write-Line ''
-        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $final)) 'Dim'
+        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $script:ExitCode)) 'Dim'
     }
-
-    if ($script:RestartRequired) {
-        if ($AutoReboot) { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force; $script:ExitCode = 3010; return }
-        $script:ExitCode = 3010; return
-    }
-    if ($script:ExitCode -ne 0) { $script:ExitCode = $script:ExitCode; return }
-    if (@($script:Warnings).Count -gt 0) { $script:ExitCode = 2; return }
-    $script:ExitCode = 0; return
 }
 
-# Invoke-Main sets $script:ExitCode itself. Its output is NOT captured, so RMM mode
-# can emit its JSON object on stdout for a pipeline to consume.
-Invoke-Main
+function Get-FinalExitCode {
+    # A partial failure must not be hidden behind a restart-required success code.
+    if ($script:ExitCode -ne 0) { return $script:ExitCode }
+    if ($script:RestartRequired) { return 3010 }
+    if (@($script:Warnings).Count -gt 0) { return 2 }
+    return 0
+}
+
+function Invoke-EntryPoint {
+    $script:RmmOutputWritten = $false
+    $failureMessage = $null
+    try { Invoke-Main }
+    catch {
+        $script:ExitCode = 1
+        $failureMessage = $_.Exception.Message
+        if (-not $Rmm) { Write-Line ('WinDSH failed: {0}' -f $failureMessage) 'Bad' }
+    }
+    # Validation/elevation failures return before assessment. Automation still gets
+    # one JSON result rather than a silent exit or mixed diagnostic output.
+    if ($Rmm -and -not $script:RmmOutputWritten -and -not ($Version -or $ListControls -or $SelfTest)) {
+        if (-not $failureMessage) { $failureMessage = Get-ExitCodeMeaning -Code $script:ExitCode }
+        Write-Output (([pscustomobject]@{
+            schemaVersion = $script:SchemaVersion; tool = $script:ToolName
+            version = $script:ToolVersion; exitCode = $script:ExitCode
+            restartRequired = $script:RestartRequired; error = $failureMessage
+        }) | ConvertTo-Json -Compress)
+    }
+}
+
+# Invoke-Main sets its exit code; do not capture stdout in the entry point.
+Invoke-EntryPoint
 exit $script:ExitCode

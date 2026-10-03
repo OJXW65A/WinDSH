@@ -27,13 +27,13 @@
     Report only. Makes no changes. Cannot be combined with a remediation switch.
 
 .PARAMETER EnableAllSafe
-    Unattended: apply the conservative recommended set.
+    Unattended: apply the conservative set; skip failed or unknown compatibility checks.
 
 .PARAMETER Enable
-    Unattended: apply specific controls by id (see -ListControls).
+    Unattended: apply specific controls by id. Typed safety overrides remain interactive.
 
 .PARAMETER Revert
-    Undo a previous run. Use -RunId, or the most recent run when omitted.
+    Undo completed writes still matching current state. Defaults to the newest open run.
 
 .PARAMETER RunId
     The change-journal run to revert.
@@ -45,7 +45,7 @@
     Explain one control by id and exit, e.g. -Explain secure-launch.
 
 .PARAMETER HtmlReport
-    Write an HTML report with a security score.
+    Write an HTML report with an applicable protection score.
 
 .PARAMETER JsonReport
     Write a machine-readable JSON report.
@@ -60,7 +60,7 @@
     Where reports are written. Defaults to a WinDSH folder on the Desktop.
 
 .PARAMETER Rmm
-    Emit one compact JSON object on stdout. Implies unattended and no console output.
+    Emit one compact JSON object on stdout. Explicit report-format switches also write files.
 
 .PARAMETER Advanced
     Show full technical detail in the console instead of the plain-language summary.
@@ -83,11 +83,11 @@
 .NOTES
     Exit codes:
       0    success, no restart required
-      1    invalid usage or startup failure
+      1    invalid usage, startup/runtime failure, or remediation error
       2    audit or remediation completed with warnings
       3    self-integrity check failed; remediation disabled
       4    elevation required
-      5    revert failed
+      5    revert failed or conflicted
       3010 success, restart required
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -113,6 +113,10 @@ param(
     [switch]$Version
 )
 
+# Preserve script-level bound arguments; Invoke-Main has no bound parameters.
+$script:InvocationParameters = @{}
+foreach ($parameterName in $PSBoundParameters.Keys) { $script:InvocationParameters[$parameterName] = $PSBoundParameters[$parameterName] }
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
@@ -122,7 +126,7 @@ $script:SchemaVersion   = '2.0'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = 'e933d2fd5439ab243174f62446968c2ed937864d046f1b303761ed42aa7de7f9'
+$script:ExpectedIntegrityHash = '4702249c131a831e2d30cf59784d9b77706de2ff810a277e3b3963f6db36d8e5'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -276,15 +280,20 @@ function New-RegistryProvider {
             }
             catch { return $false }
         }
+        GetKind = {
+            param([string]$Path, [string]$Name)
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return $key.GetValueKind($Name).ToString()
+        }
         SetValue = {
             param([string]$Path, [string]$Name, [string]$Type, $Value)
-            if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
-            New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
+            if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+            New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Type -Value $Value -Force -ErrorAction Stop | Out-Null
         }
         RemoveValue = {
             param([string]$Path, [string]$Name)
             if (-not (Test-Path -LiteralPath $Path)) { return }
-            Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction SilentlyContinue
+            Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop
         }
     }
 }
@@ -292,13 +301,15 @@ function New-RegistryProvider {
 function New-InMemoryRegistryProvider {
     param([hashtable]$Seed)
     $store = @{}
-    if ($Seed) { foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] } }
+    $kinds = @{}
+    if ($Seed) { foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k]; $kinds[$k] = 'DWord' } }
 
     # GetNewClosure binds $store into each scriptblock; without it they resolve
     # $store in the caller's scope at invocation time and fail.
     return @{
         Kind = 'InMemory'
         Store = $store
+        Kinds = $kinds
         GetValue = {
             param([string]$Path, [string]$Name)
             $key = '{0}|{1}' -f $Path, $Name
@@ -309,14 +320,19 @@ function New-InMemoryRegistryProvider {
             param([string]$Path, [string]$Name)
             return $store.ContainsKey(('{0}|{1}' -f $Path, $Name))
         }.GetNewClosure()
+        GetKind = {
+            param([string]$Path, [string]$Name)
+            return $kinds[('{0}|{1}' -f $Path, $Name)]
+        }.GetNewClosure()
         SetValue = {
             param([string]$Path, [string]$Name, [string]$Type, $Value)
+            $kinds[('{0}|{1}' -f $Path, $Name)] = $Type
             $store[('{0}|{1}' -f $Path, $Name)] = $Value
         }.GetNewClosure()
         RemoveValue = {
             param([string]$Path, [string]$Name)
             $key = '{0}|{1}' -f $Path, $Name
-            if ($store.ContainsKey($key)) { $store.Remove($key) }
+            if ($store.ContainsKey($key)) { $store.Remove($key); $kinds.Remove($key) }
         }.GetNewClosure()
     }
 }
@@ -325,6 +341,7 @@ $script:Registry = New-RegistryProvider
 
 function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
+function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
 
 # ---------------------------------------------------------------------------
@@ -356,7 +373,8 @@ function Confirm-Action {
         [string]$RequireTyped
     )
 
-    if ($script:Unattended) { return $true }
+    # Invocation consent covers ordinary changes, never a typed safety override.
+    if ($script:Unattended) { return [bool](-not $RequireTyped) }
 
     if ($RequireTyped) {
         Write-Line ('Type {0} to continue, or anything else to cancel.' -f $RequireTyped) 'Warn'
@@ -382,40 +400,52 @@ function Get-ExitCodeMeaning {
     param([int]$Code)
     switch ($Code) {
         0    { 'Completed successfully. No restart needed.' }
-        1    { 'Could not start: the options given were not valid.' }
+        1    { 'Invalid options, startup/runtime failure, or remediation error.' }
         2    { 'Completed, but with warnings.' }
         3    { 'The file failed its integrity check, so changes were disabled.' }
         4    { 'Administrator rights were required but not available.' }
-        5    { 'The undo operation failed.' }
+        5    { 'The undo operation failed or has unresolved conflicts.' }
         3010 { 'Completed. Windows must restart for the changes to take effect.' }
         default { 'Unrecognised exit code {0}.' -f $Code }
     }
 }
 
-function Get-RelaunchArgumentList {
-    <#
-        Rebuilds the invocation from bound parameters instead of concatenating a raw
-        command line. v1's launcher forwarded %* unfiltered into the elevated process,
-        which let a caller steer parameters of a process running with higher privilege.
-        Each value is quoted and internal quotes doubled, so a value can never become
-        a new argument.
-    #>
-    param([hashtable]$Bound)
+function ConvertTo-NativeArgument {
+    <# Quote one argv element using Windows CRT rules used by Start-Process. #>
+    param([AllowEmptyString()][string]$Value)
+    $escaped = [regex]::Replace($Value, '(\\*)"', {
+        param($match)
+        return (('\' * ($match.Groups[1].Value.Length * 2 + 1)) + '"')
+    })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return ('"{0}"' -f $escaped)
+}
 
-    # NOT named $args: that is an automatic variable in PowerShell.
+function Get-RelaunchArgumentList {
+    <# Serialize validated script parameters as argv, never PowerShell expressions. #>
+    param([hashtable]$Bound)
     $list = @()
     foreach ($key in $Bound.Keys) {
+        if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
         if ($value -is [switch]) {
+            # Windows PowerShell 5.1 -File cannot bind explicit switch booleans.
+            # False switches keep their default by omission in a fresh child.
             if ($value.IsPresent) { $list += ('-{0}' -f $key) }
         }
         elseif ($value -is [array]) {
-            $list += ('-{0}' -f $key)
-            foreach ($v in $value) { $list += ('"{0}"' -f ([string]$v -replace '"', '""')) }
+            # powershell.exe -File does not bind several native argv elements to an
+            # array parameter. Enable uses one comma-separated string on relaunch.
+            if ($key -ne 'Enable') { throw 'Only the Enable parameter accepts an array.' }
+            foreach ($controlId in $value) {
+                if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control {0}.' -f $controlId) }
+            }
+            $list += '-Enable'
+            $list += ConvertTo-NativeArgument -Value ($value -join ',')
         }
         elseif ($null -ne $value) {
             $list += ('-{0}' -f $key)
-            $list += ('"{0}"' -f ([string]$value -replace '"', '""'))
+            $list += ConvertTo-NativeArgument -Value ([string]$value)
         }
     }
     return $list
@@ -449,7 +479,7 @@ function Request-Elevation {
 
     # Process-scope Bypass only. This affects this one child process and ends with it;
     # it does not change any persistent execution policy.
-    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-NativeArgument -Value $PSCommandPath))
     $list += Get-RelaunchArgumentList -Bound $Bound
 
     try {
@@ -528,6 +558,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'vbs'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Virtualization-based Security'
         PlainName   = 'Core security container'
         Category    = 'Platform'
@@ -558,6 +589,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'platform-security'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Platform Security Level'
         PlainName   = 'Secure Boot requirement'
         Category    = 'Platform'
@@ -591,6 +623,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvci'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Memory Integrity (HVCI)'
         PlainName   = 'Driver protection'
         Category    = 'Kernel'
@@ -634,6 +667,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvci-mat'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Require UEFI Memory Attributes Table'
         PlainName   = 'Firmware compatibility check'
         Category    = 'Kernel'
@@ -662,6 +696,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'credential-guard'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization', 'CredentialGuardEdition')
         Name        = 'Credential Guard'
         PlainName   = 'Password and sign-in protection'
         Category    = 'Credentials'
@@ -693,6 +728,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'secure-launch'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization', 'Tpm2')
         Name        = 'System Guard Secure Launch'
         PlainName   = 'Firmware attack protection'
         Category    = 'Firmware'
@@ -721,6 +757,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'kernel-shadow-stacks'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Kernel-mode Hardware-enforced Stack Protection'
         PlainName   = 'Code hijacking protection'
         Category    = 'Kernel'
@@ -754,6 +791,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvpt'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Hypervisor-enforced Paging Translation'
         PlainName   = 'Memory address protection'
         Category    = 'Kernel'
@@ -774,6 +812,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'smm-firmware-measurement'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'SMM Firmware Measurement'
         PlainName   = 'Firmware self-check'
         Category    = 'Firmware'
@@ -794,6 +833,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'dep'
+        PlatformRequirements = @()
         Name        = 'Data Execution Prevention'
         PlainName   = 'Executable memory protection'
         Category    = 'Kernel'
@@ -814,6 +854,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'driver-blocklist'
+        PlatformRequirements = @('64Bit')
         Name        = 'Microsoft vulnerable driver blocklist'
         PlainName   = 'Known-bad driver blocking'
         Category    = 'Kernel'
@@ -1205,7 +1246,7 @@ function Get-CodeIntegrityEvents {
         }
         catch {
             # "No events were found" is a normal, healthy outcome, not an error.
-            if ($_.Exception.Message -match 'No events were found') { $result.Queried = $true; $result.LogAvailable = $true }
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $result.Queried = $true; $result.LogAvailable = $true }
             else { $result.Error = $_.Exception.Message; Write-DebugError ('Read {0}' -f $log) $_ }
         }
     }
@@ -1436,10 +1477,10 @@ function Test-ControlConfigured {
     $all = $true
     foreach ($value in (ConvertTo-Array $Control.LocalValues)) {
         $current = Get-RegValue -Path $value.Path -Name $value.Name
-        if ($null -eq $current) { $all = $false; break }
+        if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; break }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        if ($comparison -eq 'AtLeast') { if ([int]$current -lt [int]$value.Value) { $all = $false; break } }
-        else { if ([int]$current -ne [int]$value.Value) { $all = $false; break } }
+        if ($comparison -eq 'AtLeast') { if ([long]$current -lt [long]$value.Value) { $all = $false; break } }
+        else { if ([long]$current -ne [long]$value.Value) { $all = $false; break } }
     }
     return $all
 }
@@ -1464,61 +1505,44 @@ function Get-ControlSupport {
     #>
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
 
-    if (-not $State.Computer.Is64Bit) {
-        return [pscustomobject]@{ Supported = $false; Reason = 'These protections require a 64-bit version of Windows.'; Fix = $null }
+    $requirements = @(ConvertTo-Array $Control.PlatformRequirements)
+    foreach ($requirement in $requirements) {
+        switch ($requirement) {
+            '64Bit' {
+                if (-not $State.Computer.Is64Bit) { return [pscustomobject]@{ Supported = $false; Reason = 'This protection requires a 64-bit version of Windows.'; Fix = $null } }
+            }
+            'Hypervisor' {
+                if ($State.HypervisorLaunch.BlocksVbs) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'The Windows hypervisor is switched off in the boot configuration, so this protection cannot start.'; Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.' }
+                }
+            }
+            'Uefi' {
+                if (-not $State.Firmware.IsUefiConfirmed) {
+                    return [pscustomobject]@{ Supported = $false; Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode); Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.' }
+                }
+            }
+            'Virtualization' {
+                if (-not $State.Virtualization.FirmwareEnabled) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'CPU virtualization is turned off in firmware.'; Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.' }
+                }
+            }
+            'Tpm2' {
+                if (-not $State.Tpm.IsTPM2) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'TPM 2.0 was not confirmed, and this protection needs it to store boot measurements.'; Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.' }
+                }
+            }
+            'CredentialGuardEdition' {
+                $edition = [string]$State.Computer.EditionId
+                if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
+                    return [pscustomobject]@{ Supported = $false; Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition); Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.' }
+                }
+            }
+            default { throw ('Unknown platform requirement {0} in control {1}.' -f $requirement, $Control.Id) }
+        }
     }
     $minBuild = Get-PropertySafe $Control 'MinimumBuild' $null
     if ($null -ne $minBuild -and $State.Computer.BuildNumber -gt 0 -and $State.Computer.BuildNumber -lt [int]$minBuild) {
-        return [pscustomobject]@{
-            Supported = $false
-            Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber)
-            Fix = 'Update Windows to a newer feature release.'
-        }
-    }
-
-    if ($Control.Category -ne 'Kernel' -or $Control.Id -ne 'driver-blocklist') {
-        if ($Control.Id -ne 'driver-blocklist') {
-            if ($State.HypervisorLaunch.BlocksVbs) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = 'The Windows hypervisor is switched off in the boot configuration, so no protection of this kind can start.'
-                    Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.'
-                }
-            }
-            if (-not $State.Firmware.IsUefiConfirmed) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode)
-                    Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.'
-                }
-            }
-            if (-not $State.Virtualization.FirmwareEnabled) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = 'CPU virtualization is turned off in firmware.'
-                    Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.'
-                }
-            }
-        }
-    }
-
-    if ($Control.Id -eq 'secure-launch' -and -not $State.Tpm.IsTPM2) {
-        return [pscustomobject]@{
-            Supported = $false
-            Reason = 'TPM 2.0 was not confirmed, and Secure Launch needs it to store boot measurements.'
-            Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.'
-        }
-    }
-
-    if ($Control.Id -eq 'credential-guard') {
-        $edition = [string]$State.Computer.EditionId
-        if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
-            return [pscustomobject]@{
-                Supported = $false
-                Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition)
-                Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.'
-            }
-        }
+        return [pscustomobject]@{ Supported = $false; Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber); Fix = 'Update Windows to a newer feature release.' }
     }
 
     return [pscustomobject]@{ Supported = $true; Reason = $null; Fix = $null }
@@ -1543,9 +1567,9 @@ function Get-ControlPreflight {
 
             return [pscustomobject]@{
                 Kind = $preflight.Kind
-                Tripped = [bool]($events.EventCount -gt 0)
+                Tripped = [bool](-not $events.Queried -or $events.EventCount -gt 0)
                 BlocksSafeSet = [bool]$preflight.BlocksSafeSet
-                Message = $preflight.Message
+                Message = if ($events.Queried) { $preflight.Message } else { 'Could not verify driver compatibility because the Code Integrity log could not be queried.' }
                 EventCount = $events.EventCount
                 Drivers = $events.Drivers
                 Newest = $events.Newest
@@ -1659,6 +1683,8 @@ function Get-SecurityScore {
         Possible = [math]::Round($possible, 1)
         ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
         Breakdown = $breakdown
+        ApplicableCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.Supported }).Count
+        TotalCount = @($Statuses | Where-Object { $_.Weight -gt 0 }).Count
     }
 }
 
@@ -1745,10 +1771,10 @@ function Get-CisComplianceReport {
 # ---------------------------------------------------------------------------
 
 function Get-ControlExplanation {
-    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State)
+    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State, $Status)
 
     $control = Get-Control -Id $Id
-    $status = Get-ControlStatus -Id $Id -State $State
+    $status = if ($Status) { $Status } else { Get-ControlStatus -Id $Id -State $State }
 
     $verdict = $null; $action = $null; $severity = 'Info'
 
@@ -1797,7 +1823,8 @@ function Get-ControlExplanation {
         if ($preflight -and $preflight.Tripped) {
             $verdict = ('{0} is not configured, and enabling it right now looks risky.' -f $control.Name)
             $lines = @($preflight.Message, '')
-            $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount)
+            if ($preflight.Queried) { $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount) }
+            elseif ($preflight.Error) { $lines += ('  Log query failed: {0}' -f $preflight.Error) }
             foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
                 $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
                 $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
@@ -1805,7 +1832,7 @@ function Get-ControlExplanation {
                 $lines += ('  - {0} ({1}, {2}){3}' -f $d.FileName, $who, $ver, $svc)
             }
             $lines += ''
-            $lines += '  Update or remove the driver above, restart, then run the audit again.'
+            $lines += $(if ($preflight.Queried) { '  Update or remove the driver above, restart, then run the audit again.' } else { '  Restore access to the Code Integrity log, then run the audit again. Automatic remediation will skip this protection.' })
             $action = ($lines -join "`n")
             $severity = 'Warn'
         }
@@ -1874,6 +1901,19 @@ function Get-HardwareCapabilityAdvice {
         default {
             return 'Everything Windows can verify is in order. The remaining explanation is that this hardware or firmware does not provide the capability.'
         }
+    }
+}
+
+function Get-Assessment {
+    param([Parameter(Mandatory = $true)]$State)
+    $statuses = @(Get-AllControlStatus -State $State)
+    return [pscustomobject]@{
+        State = $State
+        Statuses = $statuses
+        Score = Get-SecurityScore -Statuses $statuses
+        SecuredCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
+        Cis = Get-CisComplianceReport -State $State -Statuses $statuses
+        Explanations = @($statuses | ForEach-Object { Get-ControlExplanation -Id $_.Id -State $State -Status $_ })
     }
 }
 
@@ -2206,8 +2246,8 @@ function Show-CodeIntegrityDiagnostics {
 # Plan, apply and revert.
 #
 # The plan is a projection of the catalog, so -WhatIf cannot disagree with what apply
-# actually writes. Every change is journalled BEFORE the registry is touched, which is
-# what makes rollback possible even after an interrupted run. v1 had no rollback at all.
+# actually writes. Intent is flushed before writing; completion/revert markers distinguish
+# confirmed changes from ambiguous interrupted writes and prevent stale replay.
 # ---------------------------------------------------------------------------
 
 function Get-ControlDelta {
@@ -2219,10 +2259,11 @@ function Get-ControlDelta {
         $exists = Test-RegValue -Path $value.Path -Name $value.Name
         $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
+        $currentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
 
-        $needs = if (-not $exists) { $true }
-                 elseif ($comparison -eq 'AtLeast') { [int]$current -lt [int]$value.Value }
-                 else { [int]$current -ne [int]$value.Value }
+        $needs = if (-not $exists -or $currentType -ne $value.Type) { $true }
+                 elseif ($comparison -eq 'AtLeast') { [long]$current -lt [long]$value.Value }
+                 else { [long]$current -ne [long]$value.Value }
 
         $rows += [pscustomobject]@{
             ControlId = $control.Id
@@ -2233,6 +2274,7 @@ function Get-ControlDelta {
             Comparison = $comparison
             CurrentValue = $current
             CurrentExists = $exists
+            CurrentType = $currentType
             DesiredValue = $value.Value
             NeedsChange = [bool]$needs
             Note = $value.Note
@@ -2244,7 +2286,8 @@ function Get-ControlDelta {
 function Get-ChangePlan {
     param(
         [Parameter(Mandatory = $true)][string[]]$Ids,
-        [Parameter(Mandatory = $true)]$State
+        [Parameter(Mandatory = $true)]$State,
+        [string[]]$ExplicitIds = @()
     )
     $plan = @()
     $seen = @{}
@@ -2254,7 +2297,22 @@ function Get-ChangePlan {
             $seen[$control.Id] = $true
 
             $status = Get-ControlStatus -Id $control.Id -State $State
-            foreach ($row in (Get-ControlDelta -Id $control.Id)) {
+            $preflight = $null
+            $deltas = @(Get-ControlDelta -Id $control.Id)
+            if ($status.Supported -and -not $status.ManagedByPolicy -and @($deltas | Where-Object { $_.NeedsChange }).Count -gt 0 -and @($deltas | Where-Object { $_.CurrentExists -and $_.CurrentType -ne $_.Type }).Count -eq 0) {
+                $preflight = Get-ControlPreflight -Control $control
+            }
+            $requiresOverride = [bool]($preflight -and $preflight.Tripped -and $preflight.BlocksSafeSet)
+            $explicit = [bool]($ExplicitIds -contains $control.Id)
+            $skip = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
+                    elseif (-not $status.Supported) { $status.SupportReason }
+                    elseif (@($deltas | Where-Object { $_.CurrentExists -and $_.CurrentType -ne $_.Type }).Count -gt 0) { 'An existing registry value has an unexpected type. Review it manually before remediation.' }
+                    elseif ($requiresOverride) {
+                        if ($explicit -and -not $script:Unattended) { $preflight.Message + ' A typed override is required.' }
+                        else { $preflight.Message + ' Skipped for safety; use the interactive specific-control menu to confirm an override.' }
+                    }
+                    else { $null }
+            foreach ($row in $deltas) {
                 $plan += [pscustomobject]@{
                     ControlId = $row.ControlId
                     ControlName = $row.ControlName
@@ -2263,15 +2321,29 @@ function Get-ChangePlan {
                     Type = $row.Type
                     CurrentValue = $row.CurrentValue
                     CurrentExists = $row.CurrentExists
+                    CurrentType = $row.CurrentType
                     DesiredValue = $row.DesiredValue
                     NeedsChange = $row.NeedsChange
                     Note = $row.Note
                     ManagedByPolicy = $status.ManagedByPolicy
                     Supported = $status.Supported
-                    SkipReason = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
-                                 elseif (-not $status.Supported) { $status.SupportReason }
-                                 else { $null }
+                    ExplicitlyRequested = $explicit
+                    Preflight = $preflight
+                    RequiresOverride = $requiresOverride
+                    DependencyReady = [bool]($status.Supported -and $status.Running -and (-not $status.ManagedByPolicy -or $status.PolicyValue -ne 0))
+                    SkipReason = $skip
                 }
+            }
+        }
+    }
+    # A dependent cannot be enabled when its required protection is blocked.
+    foreach ($row in $plan) {
+        if ($row.SkipReason) { continue }
+        foreach ($dep in (ConvertTo-Array (Get-Control -Id $row.ControlId).Requires)) {
+            $blockedDep = @($plan | Where-Object { $_.ControlId -eq $dep -and $_.SkipReason -and -not $_.DependencyReady })
+            if ($blockedDep.Count -gt 0) {
+                $row.SkipReason = ('Required control {0} is blocked: {1}' -f $dep, $blockedDep[0].SkipReason)
+                break
             }
         }
     }
@@ -2282,47 +2354,162 @@ function Get-ChangePlan {
 # Change journal
 # ---------------------------------------------------------------------------
 
+# Tests inject a private path only with the in-memory registry provider. An inherited
+# WINDSH_JOURNAL_PATH never controls an elevated production write.
+$script:TestJournalPath = $null
+
 function Get-JournalPath {
-    if ($env:WINDSH_JOURNAL_PATH) { return $env:WINDSH_JOURNAL_PATH }
-    $root = if ($env:ProgramData) { Join-Path $env:ProgramData 'WinDSH' } else { Join-Path ([IO.Path]::GetTempPath()) 'WinDSH' }
-    return (Join-Path $root 'changes.jsonl')
+    if ($script:Registry.Kind -eq 'InMemory' -and $script:TestJournalPath) { return $script:TestJournalPath }
+    $programData = [Environment]::GetFolderPath('CommonApplicationData')
+    if (-not $programData) { throw 'ProgramData is unavailable; refusing to use a temporary production journal.' }
+    return (Join-Path (Join-Path $programData 'WinDSH') 'changes.jsonl')
+}
+
+function Enter-JournalLock {
+    $path = Get-JournalPath
+    $dir = Split-Path -Parent $path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+    if ($script:Registry.Kind -eq 'Windows') {
+        # The journal contains privileged rollback data. Reject links and restrict
+        # writes to administrators/SYSTEM, including an existing pre-created folder.
+        $item = Get-Item -LiteralPath $dir -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'The journal folder cannot be a reparse point.' }
+        foreach ($file in @($path, ($path + '.lock'))) {
+            if (Test-Path -LiteralPath $file) {
+                if ((Get-Item -LiteralPath $file -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Journal files cannot be reparse points.' }
+            }
+        }
+        $acl = New-Object Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sidText in @('S-1-5-32-544', 'S-1-5-18')) {
+            $sid = New-Object Security.Principal.SecurityIdentifier($sidText)
+            $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+            $acl.AddAccessRule($rule)
+        }
+        $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+        Set-Acl -LiteralPath $dir -AclObject $acl -ErrorAction Stop
+        foreach ($file in @($path, ($path + '.lock'))) {
+            if (-not (Test-Path -LiteralPath $file)) { continue }
+            $fileAcl = New-Object Security.AccessControl.FileSecurity
+            $fileAcl.SetAccessRuleProtection($false, $false)
+            $fileAcl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+            Set-Acl -LiteralPath $file -AclObject $fileAcl -ErrorAction Stop
+        }
+    }
+    try { $handle = [IO.File]::Open(($path + '.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+    catch { throw 'Another WinDSH change operation is running, or the journal lock is inaccessible. No changes were made.' }
+    try {
+        # Validate the existing journal before any new change. Remove only an invalid
+        # unterminated tail, otherwise the next append would turn it into middle damage.
+        [void](Get-Journal)
+        if (Test-Path -LiteralPath $path) {
+            $raw = [IO.File]::ReadAllText($path)
+            if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n")) {
+                $lastLf = $raw.LastIndexOf("`n")
+                $tail = $raw.Substring($lastLf + 1)
+                try {
+                    $tailRecord = $tail | ConvertFrom-Json -ErrorAction Stop
+                    if (-not (Get-PropertySafe $tailRecord 'RunId' $null)) { throw 'Missing RunId.' }
+                    $repaired = $raw + "`n"
+                }
+                catch { $repaired = $raw.Substring(0, $lastLf + 1) }
+                [IO.File]::WriteAllText($path, $repaired, (New-Object Text.UTF8Encoding($false)))
+            }
+        }
+        return $handle
+    }
+    catch { $handle.Dispose(); throw }
 }
 
 function Write-JournalEntry {
     param([Parameter(Mandatory = $true)]$Entry)
     $path = Get-JournalPath
-    $dir = Split-Path -Parent $path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    [IO.File]::AppendAllText($path, (($Entry | ConvertTo-Json -Compress -Depth 5) + "`n"), (New-Object Text.UTF8Encoding($false)))
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($Entry | ConvertTo-Json -Compress -Depth 5) + "`n")
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) }
+    finally { $stream.Dispose() }
 }
 
 function Get-Journal {
     param([string]$RunId)
     $path = Get-JournalPath
     if (-not (Test-Path -LiteralPath $path)) { return @() }
-
+    $raw = [IO.File]::ReadAllText($path)
+    $lines = @($raw -split "`n")
     $entries = @()
-    foreach ($line in [IO.File]::ReadAllLines($path)) {
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i].TrimEnd("`r")
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        # A truncated tail must not make the whole journal unreadable.
-        try { $entries += ($line | ConvertFrom-Json) } catch { continue }
+        try {
+            $record = $line | ConvertFrom-Json -ErrorAction Stop
+            if (-not (Get-PropertySafe $record 'RunId' $null)) { throw 'Missing RunId.' }
+            $entries += $record
+        }
+        catch {
+            # Only a torn final append may be ignored; a corrupt middle/terminated
+            # record could hide an applied/reverted marker, so do not guess.
+            if ($i -eq $lines.Count - 1 -and -not $raw.EndsWith("`n")) { break }
+            throw ('The change journal is malformed at line {0}. Revert is disabled until it is repaired.' -f ($i + 1))
+        }
     }
     if ($RunId) { $entries = @($entries | Where-Object { $_.RunId -eq $RunId }) }
     return $entries
 }
 
+function Get-JournalChanges {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Records)
+    $changes = @(); $seen = @{}; $index = 0
+    foreach ($record in $Records) {
+        $index++
+        $kind = Get-PropertySafe $record 'RecordType' 'LegacyChange'
+        if ($kind -notin @('Change', 'LegacyChange')) { continue }
+        $id = Get-PropertySafe $record 'ChangeId' ('legacy-{0}' -f $index)
+        if ($seen.ContainsKey($id)) { throw 'The journal contains duplicate change identifiers.' }
+        $seen[$id] = $true
+        $markers = @($Records | Where-Object { (Get-PropertySafe $_ 'ChangeId' '') -eq $id })
+        $changes += [pscustomobject]@{
+            Id = $id
+            Entry = $record
+            Applied = [bool]($kind -eq 'LegacyChange' -or @($markers | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'Applied' }).Count -gt 0)
+            RevertStarted = [bool](@($markers | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertStarted' }).Count -gt 0)
+            Reverted = [bool](@($markers | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'Reverted' }).Count -gt 0)
+        }
+    }
+    return $changes
+}
+
 function Get-JournalRuns {
     $runs = @()
     foreach ($group in (Get-Journal | Group-Object RunId)) {
-        $first = @($group.Group | Sort-Object Time)[0]
+        $changes = @(Get-JournalChanges -Records @($group.Group) | Where-Object { -not $_.Reverted })
+        if ($changes.Count -eq 0) { continue }
+        if (@($group.Group | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertCompleted' }).Count -gt 0) { continue }
+        $first = @($group.Group)[0]
         $runs += [pscustomobject]@{
             RunId = $group.Name
             Time = $first.Time
-            ChangeCount = $group.Count
-            Controls = (@($group.Group | Select-Object -ExpandProperty ControlId -Unique) -join ', ')
+            ChangeCount = $changes.Count
+            Controls = (@($changes | ForEach-Object { $_.Entry.ControlId } | Select-Object -Unique) -join ', ')
         }
     }
     return @($runs | Sort-Object Time -Descending)
+}
+
+function Write-JournalMarker {
+    param([string]$RunId, [string]$RecordType, [string]$ChangeId)
+    Write-JournalEntry ([pscustomobject]@{ RunId = $RunId; Time = (Get-Date).ToUniversalTime().ToString('o'); RecordType = $RecordType; ChangeId = $ChangeId })
+}
+
+function Test-JournalChange {
+    param($Entry)
+    # A journal is data, not authority to write arbitrary registry paths or policies.
+    $control = Get-Control -Id $Entry.ControlId
+    $allowed = @($control.LocalValues | Where-Object { $_.Path -eq $Entry.Path -and $_.Name -eq $Entry.Name -and $_.Type -eq $Entry.Type -and $_.Value -eq $Entry.AfterValue })
+    if ($allowed.Count -ne 1 -or $Entry.BeforeExists -isnot [bool]) { throw 'The journal contains a change outside the control catalog.' }
+    $beforeType = Get-PropertySafe $Entry 'BeforeType' $Entry.Type
+    if ($Entry.BeforeExists -and ($beforeType -ne 'DWord' -or $Entry.BeforeValue -isnot [ValueType] -or [long]$Entry.BeforeValue -lt [int]::MinValue -or [long]$Entry.BeforeValue -gt [uint32]::MaxValue)) {
+        throw 'The journal contains an unsupported prior registry value. Restore it manually.'
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -2334,165 +2521,189 @@ function Invoke-ControlApply {
     param(
         [Parameter(Mandatory = $true)][string[]]$Ids,
         [Parameter(Mandatory = $true)]$State,
-        [string]$RunId
+        [string]$RunId,
+        [string[]]$ExplicitIds = @()
     )
 
     if (-not $script:RemediationAllowed) { throw 'Remediation is disabled because the self-integrity check failed.' }
     if (-not $RunId) { $RunId = [Guid]::NewGuid().ToString('N').Substring(0, 12) }
 
-    $applied = @(); $skipped = @()
-    $plan = Get-ChangePlan -Ids $Ids -State $State
+    $lock = $null
+    if (-not $WhatIfPreference) { $lock = Enter-JournalLock }
+    try {
+        $applied = @(); $skipped = @()
+        $plan = @(Get-ChangePlan -Ids $Ids -State $State -ExplicitIds $ExplicitIds)
 
-    # --- pre-flight safety checks -----------------------------------------
-    # A control can declare evidence that makes applying it risky right now. In the safe
-    # set a tripped check skips the control outright; a user who explicitly named that
-    # control may override it, but only by typing its id.
-    $blocked = @{}
-    foreach ($controlId in (@($plan | Select-Object -ExpandProperty ControlId -Unique))) {
-        $control = Get-Control -Id $controlId
-        $preflight = Get-ControlPreflight -Control $control
-        if (-not $preflight -or -not $preflight.Tripped) { continue }
-
-        Write-Line ''
-        Write-Line ('{0}: {1}' -f $control.Name, $preflight.Message) 'Warn'
-        foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
-            $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
-            $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
-            Write-Line ('{0} ({1}, {2})' -f $d.FileName, $who, $ver) 'Warn' 2
-        }
-
-        $explicitlyRequested = [bool](@($Ids) -contains $controlId)
-        if (-not $explicitlyRequested) {
-            $blocked[$controlId] = 'Skipped for safety: recent driver-compatibility warnings.'
-            Write-Line 'Skipping it. Ask for it by name to override.' 'Info' 2
-            continue
-        }
-        if (-not (Confirm-Action ('Enable {0} anyway?' -f $control.Name) -RequireTyped $controlId)) {
-            $blocked[$controlId] = 'Cancelled: driver-compatibility warnings were not overridden.'
-            Write-Line 'Cancelled.' 'Info' 2
-        }
-    }
-
-    # --- confirmation -----------------------------------------------------
-    $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason -and -not $blocked.ContainsKey($_.ControlId) })
-    if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
-        Write-Section 'About to change'
-        foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
-            $control = Get-Control -Id $controlId
-            Write-Line $control.Name 'Info' 2
-            $caution = Get-PropertySafe $control 'Caution' $null
-            if ($caution) { Write-Line $caution 'Warn' 5 }
-        }
-        Write-Line ''
-        Write-Line ('{0} registry value(s) will change. A restart will be needed.' -f @($pending).Count) 'Plain'
-        if (-not (Confirm-Action 'Continue?' -DefaultYes)) {
-            Write-Line 'Cancelled. Nothing was changed.' 'Info'
-            return [pscustomobject]@{ RunId = $RunId; Applied = @(); Skipped = @(); ChangeCount = 0; RestartRequired = $false; Cancelled = $true }
-        }
-    }
-
-    foreach ($row in $plan) {
-        if ($blocked.ContainsKey($row.ControlId)) {
-            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
-                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $blocked[$row.ControlId] }
+        # Both preview and apply consume the same safety decision. Only a specifically
+        # selected control in an interactive session can override a tripped check.
+        foreach ($group in ($plan | Group-Object ControlId)) {
+            $row = @($group.Group)[0]
+            if (-not $row.RequiresOverride -or -not $row.ExplicitlyRequested -or $script:Unattended -or $WhatIfPreference) { continue }
+            Write-Line $row.Preflight.Message 'Warn'
+            if (Confirm-Action ('Enable {0} anyway?' -f $row.ControlName) -RequireTyped $row.ControlId) {
+                foreach ($value in $group.Group) { $value.SkipReason = $null }
             }
-            continue
         }
-        if ($row.SkipReason) {
-            if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
-                $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
+        # Rebuild dependency decisions after a genuine override without repeating queries.
+        foreach ($row in $plan) {
+            if ($row.SkipReason -notlike 'Required control *') { continue }
+            $blockedDeps = @((Get-Control -Id $row.ControlId).Requires | Where-Object {
+                $depId = $_
+                @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason -and -not $_.DependencyReady }).Count -gt 0
+            })
+            if ($blockedDeps.Count -eq 0) { $row.SkipReason = $null }
+        }
+
+        # --- confirmation -----------------------------------------------------
+        $pending = @($plan | Where-Object { $_.NeedsChange -and -not $_.SkipReason })
+        if (@($pending).Count -gt 0 -and -not $script:Unattended -and -not $WhatIfPreference) {
+            Write-Section 'About to change'
+            foreach ($controlId in (@($pending | Select-Object -ExpandProperty ControlId -Unique))) {
+                $control = Get-Control -Id $controlId
+                Write-Line $control.Name 'Info' 2
+                $caution = Get-PropertySafe $control 'Caution' $null
+                if ($caution) { Write-Line $caution 'Warn' 5 }
             }
-            continue
+            Write-Line ''
+            Write-Line ('{0} registry value(s) will change. A restart will be needed.' -f @($pending).Count) 'Plain'
+            if (-not (Confirm-Action 'Continue?' -DefaultYes)) {
+                Write-Line 'Cancelled. Nothing was changed.' 'Info'
+                return [pscustomobject]@{ RunId = $RunId; Applied = @(); Skipped = @(); ChangeCount = 0; RestartRequired = $false; Cancelled = $true }
+            }
         }
-        if (-not $row.NeedsChange) { continue }
 
-        $target = '{0}\{1}' -f $row.Path, $row.Name
-        if (-not $PSCmdlet.ShouldProcess($target, ('Set {0} to {1}' -f $row.Type, $row.DesiredValue))) { continue }
+        foreach ($row in $plan) {
+            if ($row.SkipReason) {
+                if (-not @($skipped | Where-Object { $_.ControlId -eq $row.ControlId }).Count) {
+                    $skipped += [pscustomobject]@{ ControlId = $row.ControlId; ControlName = $row.ControlName; Reason = $row.SkipReason }
+                }
+                continue
+            }
+            if (-not $row.NeedsChange) { continue }
 
-        # Journal first. A crash before the write leaves a harmless no-op entry;
-        # a crash after an unjournalled write leaves an unrevertible change.
-        Write-JournalEntry ([pscustomobject]@{
+            $target = '{0}\{1}' -f $row.Path, $row.Name
+            if (-not $PSCmdlet.ShouldProcess($target, ('Set {0} to {1}' -f $row.Type, $row.DesiredValue))) { continue }
+
+            # Check again under the run lock: another administrator can change state
+            # after planning even though other WinDSH processes are serialized.
+            $existsNow = Test-RegValue -Path $row.Path -Name $row.Name
+            $currentNow = if ($existsNow) { Get-RegValue -Path $row.Path -Name $row.Name } else { $null }
+            $kindNow = if ($existsNow) { Get-RegKind -Path $row.Path -Name $row.Name } else { $null }
+            if ($existsNow -ne $row.CurrentExists -or $currentNow -ne $row.CurrentValue -or $kindNow -ne $row.CurrentType) { throw 'Registry state changed since planning. Run the audit again.' }
+            if ($existsNow -and $kindNow -ne 'DWord') { throw 'The existing registry value is not a DWORD. Review it manually before remediation.' }
+            $changeId = [Guid]::NewGuid().ToString('N')
+            Write-JournalEntry ([pscustomobject]@{
+                RecordType = 'Change'
+                ChangeId = $changeId
+                RunId = $RunId
+                Time = (Get-Date).ToUniversalTime().ToString('o')
+                ToolVersion = $script:ToolVersion
+                ControlId = $row.ControlId
+                Path = $row.Path
+                Name = $row.Name
+                Type = $row.Type
+                BeforeType = $row.CurrentType
+                BeforeExists = $row.CurrentExists
+                BeforeValue = $row.CurrentValue
+                AfterValue = $row.DesiredValue
+            })
+            & $script:Registry.SetValue $row.Path $row.Name $row.Type $row.DesiredValue
+            $script:RestartRequired = $true
+
+            $applied += [pscustomobject]@{
+                ControlId = $row.ControlId
+                ControlName = $row.ControlName
+                Path = $row.Path
+                Name = $row.Name
+                Before = if ($row.CurrentExists) { $row.CurrentValue } else { '(not set)' }
+                After = $row.DesiredValue
+            }
+            $script:AppliedChanges += $applied[-1]
+            Write-JournalMarker -RunId $RunId -RecordType 'Applied' -ChangeId $changeId
+        }
+
+        if ($applied.Count -gt 0) { $script:RestartRequired = $true }
+        if ($applied.Count -gt 0) { Write-JournalMarker -RunId $RunId -RecordType 'RunCompleted' }
+
+        return [pscustomobject]@{
             RunId = $RunId
-            Time = (Get-Date).ToUniversalTime().ToString('o')
-            ToolVersion = $script:ToolVersion
-            ControlId = $row.ControlId
-            Path = $row.Path
-            Name = $row.Name
-            Type = $row.Type
-            BeforeExists = $row.CurrentExists
-            BeforeValue = $row.CurrentValue
-            AfterValue = $row.DesiredValue
-        })
-
-        & $script:Registry.SetValue $row.Path $row.Name $row.Type $row.DesiredValue
-
-        $applied += [pscustomobject]@{
-            ControlId = $row.ControlId
-            ControlName = $row.ControlName
-            Path = $row.Path
-            Name = $row.Name
-            Before = if ($row.CurrentExists) { $row.CurrentValue } else { '(not set)' }
-            After = $row.DesiredValue
+            Applied = $applied
+            Skipped = $skipped
+            ChangeCount = $applied.Count
+            RestartRequired = [bool]($applied.Count -gt 0)
+            Cancelled = $false
         }
     }
-
-    if ($applied.Count -gt 0) { $script:RestartRequired = $true }
-    $script:AppliedChanges += $applied
-
-    return [pscustomobject]@{
-        RunId = $RunId
-        Applied = $applied
-        Skipped = $skipped
-        ChangeCount = $applied.Count
-        RestartRequired = [bool]($applied.Count -gt 0)
-        Cancelled = $false
-    }
+    finally { if ($lock) { $lock.Dispose() } }
 }
 
+
 function Invoke-ControlRevert {
-    <#
-        Restores each journalled value in reverse order. A value that did not exist before
-        the run is removed rather than set to zero, so the machine returns to its actual
-        prior state instead of an approximation of it.
-    #>
+    <# Restore only values still matching completed writes, once per entry. #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([string]$RunId)
 
-    if (-not $RunId) {
-        $runs = Get-JournalRuns
-        if (@($runs).Count -eq 0) { throw 'There is nothing to revert: no changes have been recorded on this computer.' }
-        $RunId = @($runs)[0].RunId
-    }
-
-    $entries = @(Get-Journal -RunId $RunId)
-    if ($entries.Count -eq 0) { throw ("No recorded changes found for run '{0}'." -f $RunId) }
-
-    [array]::Reverse($entries)
-    $reverted = @()
-
-    foreach ($entry in $entries) {
-        $target = '{0}\{1}' -f $entry.Path, $entry.Name
-        if ($entry.BeforeExists) {
-            if (-not $PSCmdlet.ShouldProcess($target, ('Restore to {0}' -f $entry.BeforeValue))) { continue }
-            & $script:Registry.SetValue $entry.Path $entry.Name $entry.Type $entry.BeforeValue
-            $restored = $entry.BeforeValue
+    if (-not $script:RemediationAllowed) { throw 'Revert is disabled because the self-integrity check failed.' }
+    $lock = $null
+    if (-not $WhatIfPreference) { $lock = Enter-JournalLock }
+    try {
+        if (-not $RunId) {
+            $runs = @(Get-JournalRuns)
+            if ($runs.Count -eq 0) { throw 'There is nothing to revert: no open change runs remain.' }
+            $RunId = $runs[0].RunId
         }
-        else {
-            if (-not $PSCmdlet.ShouldProcess($target, 'Remove value (did not exist before)')) { continue }
-            & $script:Registry.RemoveValue $entry.Path $entry.Name
-            $restored = '(removed)'
+        $records = @(Get-Journal -RunId $RunId)
+        if (@($records | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertCompleted' }).Count -gt 0) { throw 'This run has already been reverted.' }
+        $changes = @(Get-JournalChanges -Records $records | Where-Object { -not $_.Reverted })
+        if ($changes.Count -eq 0) { throw ('No open changes found for run {0}.' -f $RunId) }
+        # Validate every change before restoring anything, including legacy records.
+        foreach ($change in $changes) { Test-JournalChange -Entry $change.Entry }
+        [array]::Reverse($changes)
+        $reverted = @(); $conflicts = @(); $recovered = 0
+        foreach ($change in $changes) {
+            $entry = $change.Entry
+            $target = '{0}\{1}' -f $entry.Path, $entry.Name
+            $exists = Test-RegValue -Path $entry.Path -Name $entry.Name
+            $current = if ($exists) { Get-RegValue -Path $entry.Path -Name $entry.Name } else { $null }
+            $kind = if ($exists) { Get-RegKind -Path $entry.Path -Name $entry.Name } else { $null }
+            $beforeType = Get-PropertySafe $entry 'BeforeType' $entry.Type
+            $matchesBefore = [bool]($exists -eq $entry.BeforeExists -and (-not $exists -or ($current -eq $entry.BeforeValue -and $kind -eq $beforeType)))
+            if ($change.RevertStarted -and $matchesBefore) {
+                if ($Rmm -and $WhatIfPreference) { continue }
+                if ($PSCmdlet.ShouldProcess($target, 'Record recovery of an interrupted revert')) {
+                    Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
+                    $recovered++
+                }
+                continue
+            }
+            $reason = if (-not $change.Applied) { 'The original registry write was not confirmed. Review this interrupted change manually.' }
+                      elseif (-not $exists -or $current -ne $entry.AfterValue -or $kind -ne $entry.Type) { 'Current state differs from the value WinDSH wrote; leaving it unchanged.' }
+                      else { $null }
+            if ($reason) {
+                $conflicts += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; Reason = $reason }
+                continue
+            }
+            $action = if ($entry.BeforeExists) { 'Restore to {0}' -f $entry.BeforeValue } else { 'Remove value (did not exist before)' }
+            if ($Rmm -and $WhatIfPreference) { continue }
+            if (-not $PSCmdlet.ShouldProcess($target, $action)) { continue }
+            Write-JournalMarker -RunId $RunId -RecordType 'RevertStarted' -ChangeId $change.Id
+            if ($entry.BeforeExists) { & $script:Registry.SetValue $entry.Path $entry.Name $beforeType $entry.BeforeValue }
+            else { & $script:Registry.RemoveValue $entry.Path $entry.Name }
+            $script:RestartRequired = $true
+            Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
+            $restored = if ($entry.BeforeExists) { $entry.BeforeValue } else { '(removed)' }
+            $reverted += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; RestoredTo = $restored }
         }
-        $reverted += [pscustomobject]@{ ControlId = $entry.ControlId; Path = $entry.Path; Name = $entry.Name; RestoredTo = $restored }
+        if (-not $WhatIfPreference -and $conflicts.Count -eq 0 -and $reverted.Count + $recovered -eq $changes.Count) {
+            Write-JournalMarker -RunId $RunId -RecordType 'RevertCompleted'
+        }
+        return [pscustomobject]@{
+            RunId = $RunId; Reverted = $reverted; Conflicts = $conflicts
+            ChangeCount = $reverted.Count; RecoveredCount = $recovered
+            RestartRequired = [bool]($reverted.Count -gt 0)
+        }
     }
-
-    if ($reverted.Count -gt 0) { $script:RestartRequired = $true }
-
-    return [pscustomobject]@{
-        RunId = $RunId
-        Reverted = $reverted
-        ChangeCount = $reverted.Count
-        RestartRequired = [bool]($reverted.Count -gt 0)
-    }
+    finally { if ($lock) { $lock.Dispose() } }
 }
 
 # ===== 55-report-text.ps1 =====
@@ -2522,11 +2733,12 @@ function New-TextReport {
 
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
-    $lines += 'SECURITY SCORE'
+    $lines += 'APPLICABLE PROTECTION SCORE'
     $lines += ('  {0} / 100 ({1})' -f $Score.Score, $Score.Grade)
+    $lines += ('  {0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount)
     $lines += ('  {0} of {1} applicable protections are active.' -f $running, $countable)
     if ($Score.ExcludedCount -gt 0) {
-        $lines += ('  {0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount)
+        $lines += ('  {0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount)
     }
     $lines += ('  Secured-core PC: {0}' -f $(if ($SecuredCore.Qualifies) { 'qualifies' } else { ('does not qualify, {0} requirement(s) unmet' -f $SecuredCore.UnmetCount) }))
     $lines += ''
@@ -2727,7 +2939,7 @@ a{color:inherit}
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
 
     $null = $sb.AppendLine('<div class="card hero">')
-    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Security score">')
+    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Applicable protection score">')
     $null = $sb.AppendLine('<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>')
     $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filled, $gap))
     $null = $sb.AppendLine(('<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">{0}</text>' -f $Score.Score))
@@ -2736,9 +2948,11 @@ a{color:inherit}
     $null = $sb.AppendLine(('<div class="gl">{0}</div></div>' -f (ConvertTo-HtmlText $Score.Grade)))
 
     $null = $sb.AppendLine('<div class="hero-txt">')
+    $null = $sb.AppendLine('<h2>Applicable protection score</h2>')
+    $null = $sb.AppendLine(('<p class="tiny">{0} of {1} scored controls are applicable; unsupported controls are excluded.</p>' -f $Score.ApplicableCount, $Score.TotalCount))
     $null = $sb.AppendLine(('<p class="verdict">{0} of {1} applicable protections are active on this computer.</p>' -f $running, $countable))
     if ($Score.ExcludedCount -gt 0) {
-        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because this hardware cannot run them. They are not counted against you.</p>' -f $Score.ExcludedCount))
+        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because current platform requirements are not met. They are not counted against you.</p>' -f $Score.ExcludedCount))
     }
     $scVerdict = if ($SecuredCore.Qualifies) { 'This computer meets the Secured-core PC criteria.' } else { ('This computer does not meet the Secured-core PC criteria ({0} requirement(s) unmet).' -f $SecuredCore.UnmetCount) }
     $null = $sb.AppendLine(('<p class="tiny">{0}</p>' -f (ConvertTo-HtmlText $scVerdict)))
@@ -2882,6 +3096,9 @@ function New-SyntheticState {
 }
 
 function Invoke-SelfTest {
+    # Scoped event provider: self-tests never query the real host's compatibility log.
+    $ciEvidence = [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null }
+    function Get-CodeIntegrityEvents { param($EventIds, $LookbackDays) return $ciEvidence }
     $pass = 0; $fail = 0
     function Assert-That {
         param([string]$Name, [bool]$Condition, [string]$Detail = '')
@@ -2962,7 +3179,7 @@ function Invoke-SelfTest {
     Assert-That 'Every value needs changing on a clean machine' (@($plan | Where-Object { -not $_.NeedsChange }).Count -eq 0)
 
     $journal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-selftest-{0}.jsonl' -f ([Guid]::NewGuid().ToString('N').Substring(0, 8)))
-    $env:WINDSH_JOURNAL_PATH = $journal
+    $script:TestJournalPath = $journal
     try {
         $applied = Invoke-ControlApply -Ids @('hvci') -State $clean
         Assert-That 'Apply writes the planned values' ($applied.ChangeCount -eq @($plan).Count) ('changes={0}' -f $applied.ChangeCount)
@@ -2976,6 +3193,116 @@ function Invoke-SelfTest {
         $revert = Invoke-ControlRevert -RunId $applied.RunId
         Assert-That 'Revert restores every journalled value' ($revert.ChangeCount -eq $applied.ChangeCount) ('reverted={0}' -f $revert.ChangeCount)
         Assert-That 'Values that never existed are removed, not zeroed' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+
+        $closedRejected = $false
+        try { [void](Invoke-ControlRevert -RunId $applied.RunId) } catch { $closedRejected = $true }
+        Assert-That 'A completed run cannot be reverted twice' $closedRejected
+        Assert-That 'Completed runs are excluded from default rollback selection' (@(Get-JournalRuns).Count -eq 0)
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegCiConfig + '|VulnerableDriverBlocklistEnable') = 0 })
+        $conflictApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 2
+        $conflictRevert = Invoke-ControlRevert -RunId $conflictApply.RunId
+        Assert-That 'Rollback preserves later administrator changes' ((Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 2 -and $conflictRevert.Conflicts.Count -eq 1)
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'String' '1'
+        $typeRevert = Invoke-ControlRevert -RunId $conflictApply.RunId
+        Assert-That 'Rollback detects a registry type conflict' ($typeRevert.Conflicts.Count -eq 1)
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+        $retryRevert = Invoke-ControlRevert -RunId $conflictApply.RunId
+        Assert-That 'A conflicted entry can be retried when expected state is restored' ($retryRevert.ChangeCount -eq 1 -and (Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 0)
+
+        # An intent without a completion marker is ambiguous, even when the live
+        # value happens to equal AfterValue. It must never erase a later change.
+        $pendingId = 'selftest-pending'
+        $pending = [pscustomobject]@{ RecordType = 'Change'; ChangeId = 'pending-write'; RunId = $pendingId; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = 0; AfterValue = 1 }
+        Write-JournalEntry $pending
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 2
+        $pendingRevert = Invoke-ControlRevert -RunId $pendingId
+        Assert-That 'Journal-before-write cannot overwrite an unrelated later value' ($pendingRevert.ChangeCount -eq 0 -and (Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 2)
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+        $ambiguousRevert = Invoke-ControlRevert -RunId $pendingId
+        Assert-That 'Unconfirmed writes require manual review even if the value matches' ($ambiguousRevert.ChangeCount -eq 0 -and $ambiguousRevert.Conflicts.Count -eq 1)
+
+        # Legacy v2 journals stay usable, but are subject to conflict and catalog checks.
+        $legacyEntry = [pscustomobject]@{ RunId = 'selftest-legacy'; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = 0; AfterValue = 1 }
+        Write-JournalEntry $legacyEntry
+        $legacyRevert = Invoke-ControlRevert -RunId $legacyEntry.RunId
+        Assert-That 'Legacy journal entries can be safely reverted' ($legacyRevert.ChangeCount -eq 1 -and (Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable') -eq 0)
+
+        # Partial revert recovery never repeats already-restored registry writes.
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $partialApply = Invoke-ControlApply -Ids @('vbs') -State $clean
+        & $script:Registry.SetValue $script:RegDeviceGuard 'Locked' 'DWord' 2
+        $partialRevert = Invoke-ControlRevert -RunId $partialApply.RunId
+        Assert-That 'Partial rollback restores matching entries and reports conflicts' ($partialRevert.ChangeCount -eq 1 -and $partialRevert.Conflicts.Count -eq 1)
+        & $script:Registry.SetValue $script:RegDeviceGuard 'EnableVirtualizationBasedSecurity' 'DWord' 2
+        & $script:Registry.SetValue $script:RegDeviceGuard 'Locked' 'DWord' 0
+        $finishRevert = Invoke-ControlRevert -RunId $partialApply.RunId
+        Assert-That 'Retrying a partial revert never repeats completed entries' ($finishRevert.ChangeCount -eq 1 -and (Get-RegValue $script:RegDeviceGuard 'EnableVirtualizationBasedSecurity') -eq 2)
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $crashApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
+        $crashChange = @(Get-JournalChanges -Records @(Get-Journal -RunId $crashApply.RunId))[0]
+        Write-JournalMarker -RunId $crashApply.RunId -RecordType 'RevertStarted' -ChangeId $crashChange.Id
+        & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
+        $crashRevert = Invoke-ControlRevert -RunId $crashApply.RunId
+        Assert-That 'An interrupted revert is finalized without rewriting registry state' ($crashRevert.ChangeCount -eq 0 -and $crashRevert.RecoveredCount -eq 1)
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegCiConfig + '|VulnerableDriverBlocklistEnable') = 2 })
+        foreach ($pair in @(@(0, 1), @(1, 2))) {
+            Write-JournalEntry ([pscustomobject]@{ RunId = 'selftest-repeated-value'; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegCiConfig; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = $pair[0]; AfterValue = $pair[1] })
+        }
+        # Catalog validation rejects arbitrary AfterValue, even for a known path.
+        $badAfterRejected = $false
+        try { [void](Invoke-ControlRevert -RunId 'selftest-repeated-value') } catch { $badAfterRejected = $true }
+        Assert-That 'Rollback validates recorded target values against the catalog' $badAfterRejected
+
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $baseSet = $script:Registry.SetValue
+        $failureCounter = @{ Count = 0 }
+        $script:Registry.SetValue = {
+            param($Path, $Name, $Type, $Value)
+            $failureCounter.Count++
+            if ($failureCounter.Count -eq 2) { throw 'Synthetic write failure' }
+            & $baseSet $Path $Name $Type $Value
+        }.GetNewClosure()
+        $partialRejected = $false
+        try { [void](Invoke-ControlApply -Ids @('vbs') -State $clean -RunId 'selftest-partial-apply') } catch { $partialRejected = $true }
+        $script:Registry.SetValue = $baseSet
+        $partialWriteRevert = Invoke-ControlRevert -RunId 'selftest-partial-apply'
+        Assert-That 'Partial apply records completed writes and leaves pending writes untouched' ($partialRejected -and $partialWriteRevert.ChangeCount -eq 1 -and $partialWriteRevert.Conflicts.Count -eq 1)
+
+        # A process holding the lock excludes other apply/revert operations.
+        $heldLock = Enter-JournalLock
+        $lockedOut = $false
+        try { [void](Invoke-ControlApply -Ids @('vbs') -State $clean) } catch { $lockedOut = $true }
+        finally { $heldLock.Dispose() }
+        Assert-That 'Concurrent change operations are rejected before writing' $lockedOut
+
+        $validJournal = [IO.File]::ReadAllText($journal)
+        try {
+            [IO.File]::AppendAllText($journal, '{broken' + "`n")
+            $corruptRejected = $false
+            try { [void](Invoke-ControlRevert -RunId $pendingId) } catch { $corruptRejected = $true }
+            Assert-That 'Malformed terminated journal records block rollback' $corruptRejected
+            [IO.File]::WriteAllText($journal, $validJournal + '{torn')
+            $repairLock = Enter-JournalLock
+            $repairLock.Dispose()
+            Assert-That 'A torn journal tail is repaired before subsequent appends' ([IO.File]::ReadAllText($journal) -eq $validJournal)
+        }
+        finally { [IO.File]::WriteAllText($journal, $validJournal) }
+        $malicious = [pscustomobject]@{ RunId = 'selftest-invalid'; Time = (Get-Date).ToUniversalTime().ToString('o'); ControlId = 'driver-blocklist'; Path = $script:RegPolicyDG; Name = 'VulnerableDriverBlocklistEnable'; Type = 'DWord'; BeforeExists = $true; BeforeValue = 0; AfterValue = 1 }
+        Write-JournalEntry $malicious
+        $invalidRejected = $false
+        try { [void](Invoke-ControlRevert -RunId $malicious.RunId) } catch { $invalidRejected = $true }
+        Assert-That 'Journal content cannot authorize writes outside the catalog' $invalidRejected
+
+        $priorOverride = $env:WINDSH_JOURNAL_PATH
+        try {
+            $env:WINDSH_JOURNAL_PATH = 'untrusted-environment-path'
+            Assert-That 'Inherited journal environment overrides are ignored' ((Get-JournalPath) -eq $journal)
+        }
+        finally { $env:WINDSH_JOURNAL_PATH = $priorOverride }
 
         # A stronger platform security level must survive.
         Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegDeviceGuard + '|RequirePlatformSecurityFeatures') = 3 })
@@ -2992,8 +3319,8 @@ function Invoke-SelfTest {
         Assert-That 'The unmanaged dependency still applies' ((Get-RegValue -Path $script:RegDeviceGuard -Name 'EnableVirtualizationBasedSecurity') -eq 1)
     }
     finally {
-        if (Test-Path -LiteralPath $journal) { Remove-Item -LiteralPath $journal -Force }
-        Remove-Item Env:\WINDSH_JOURNAL_PATH -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $journal, ($journal + '.lock') -Force -ErrorAction SilentlyContinue
+        $script:TestJournalPath = $null
         Set-RegistryProvider (New-InMemoryRegistryProvider)
     }
 
@@ -3009,6 +3336,29 @@ function Invoke-SelfTest {
     $depOff = New-SyntheticState
     $depOff.Dep = [pscustomobject]@{ SupportPolicy = 0; Available = $true; Text = 'Always off'; Enabled = $false }
     Assert-That 'DEP off is not reported as configured' ((Get-ControlStatus -Id 'dep' -State $depOff).State -ne 'Running')
+    $depLegacy = New-SyntheticState
+    $depLegacy.Firmware.IsUefiConfirmed = $false
+    $depLegacy.Virtualization.FirmwareEnabled = $false
+    $depLegacy.HypervisorLaunch.BlocksVbs = $true
+    $depLegacy.Computer.Is64Bit = $false
+    Assert-That 'DEP does not inherit VBS platform prerequisites' ((Get-ControlStatus -Id 'dep' -State $depLegacy).State -eq 'Running')
+
+    Set-RegistryProvider (New-InMemoryRegistryProvider)
+    $assessmentBefore = Get-Assessment -State $clean
+    & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+    $assessmentAfter = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh recalculates statuses and score together' ($assessmentAfter.Score.Score -gt $assessmentBefore.Score.Score -and @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' -and $_.Running }).Count -eq 1)
+    $freshExplain = @($assessmentAfter.Explanations | Where-Object { $_.Id -eq 'driver-blocklist' })[0]
+    Assert-That 'Assessment explanations use the same refreshed status snapshot' ($freshExplain.Status -eq @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' })[0])
+    $clean.DeviceGuard.Running = @(2, 3)
+    $clean.DeviceGuard.VbsStatusCode = 2
+    $clean.DeviceGuard.HasSmmMitigations = $true
+    $coreAssessment = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh updates Secured-core and CIS derived state' ($coreAssessment.SecuredCore.Qualifies -and @($coreAssessment.Cis.Rows | Where-Object { $_.ControlId -eq 'hvci' -and $_.FeatureRunning }).Count -eq 1)
+    $clean.DeviceGuard.Running = @()
+    $clean.DeviceGuard.VbsStatusCode = 0
+    $clean.DeviceGuard.HasSmmMitigations = $false
+    & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
 
     $hvptState = New-SyntheticState
     $hvptState.DeviceGuard.Running = @(7)
@@ -3025,6 +3375,33 @@ function Invoke-SelfTest {
     Assert-That 'Memory Integrity declares a driver pre-flight check' ($null -ne $hvciControl.Preflight)
     Assert-That 'Pre-flight watches Event ID 3087' (@($hvciControl.Preflight.EventIds) -contains 3087)
     Assert-That 'Pre-flight blocks the safe set when tripped' ([bool]$hvciControl.Preflight.BlocksSafeSet)
+
+    $ciEvidence.EventCount = 1
+    $riskPlan = @(Get-ChangePlan -Ids $script:SafeControlSet -State $clean)
+    Assert-That 'Safe-set preview includes HVCI preflight blockers' (@($riskPlan | Where-Object { $_.ControlId -eq 'hvci' -and $_.SkipReason }).Count -eq 2)
+    $riskJournal = Join-Path ([IO.Path]::GetTempPath()) ('windsh-preflight-{0}.jsonl' -f [Guid]::NewGuid())
+    $script:TestJournalPath = $riskJournal
+    try {
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+        $safeRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'EnableAllSafe skips HVCI when 3087 evidence is present' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        Assert-That 'Safe-set apply reports the same preflight blocker as preview' (@($safeRisk.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
+        $explicitRisk = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
+        Assert-That 'Explicit unattended HVCI cannot bypass a typed override' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $ciEvidence.EventCount = 0
+        $ciEvidence.Queried = $false
+        $unknownRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        Assert-That 'Unknown compatibility fails closed for the safe set' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
+        $depRisk = @(Get-ChangePlan -Ids @('kernel-shadow-stacks') -State $clean)
+        Assert-That 'A preflight-blocked dependency also blocks shadow stacks' (@($depRisk | Where-Object { $_.ControlId -eq 'kernel-shadow-stacks' -and $_.SkipReason }).Count -eq 1)
+    }
+    finally {
+        $ciEvidence.Queried = $true
+        $ciEvidence.EventCount = 0
+        Remove-Item -LiteralPath $riskJournal, ($riskJournal + '.lock') -Force -ErrorAction SilentlyContinue
+        $script:TestJournalPath = $null
+        Set-RegistryProvider (New-InMemoryRegistryProvider)
+    }
 
     # --- firmware guidance (restored from v1.6.0) ---
     $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
@@ -3055,6 +3432,7 @@ function Invoke-SelfTest {
     $previousUnattended = $script:Unattended
     $script:Unattended = $true
     Assert-That 'Unattended runs never block on a confirmation prompt' (Confirm-Action 'This must not prompt')
+    Assert-That 'Unattended consent does not satisfy typed safety confirmation' (-not (Confirm-Action 'Risky' -RequireTyped 'hvci'))
     $script:Unattended = $previousUnattended
 
     # --- virtual machine assessment (restored from v1.6.0) ---
@@ -3073,10 +3451,14 @@ function Invoke-SelfTest {
 
     $hostile = Get-RelaunchArgumentList -Bound @{ ReportDirectory = 'C:\x" -Enable credential-guard "' }
     Assert-That 'Embedded quotes cannot inject a new argument' (-not ($hostile -contains '-Enable')) ($hostile -join ' ')
-    Assert-That 'Embedded quotes are doubled, not passed through' (@($hostile | Where-Object { $_ -match '""' }).Count -eq 1) ($hostile -join ' ')
+    Assert-That 'Embedded quotes use native argument escaping' (@($hostile | Where-Object { $_.Contains('\"') }).Count -eq 1) ($hostile -join ' ')
 
     $empty = Get-RelaunchArgumentList -Bound @{ AutoReboot = [switch]$false }
     Assert-That 'An unset switch is not relaunched' (@($empty).Count -eq 0) ('count={0}' -f @($empty).Count)
+    $trailing = ConvertTo-NativeArgument 'C:\Reports\'
+    Assert-That 'Trailing path backslashes cannot consume the closing argument quote' ($trailing -eq '"C:\Reports\\"')
+    $arrayRelaunch = Get-RelaunchArgumentList -Bound @{ Enable = @('hvci', 'driver-blocklist') }
+    Assert-That 'Multiple Enable controls survive native File argument binding' ($arrayRelaunch -contains '"hvci,driver-blocklist"')
 
     # --- CIS comparison ---
     $cisState = New-SyntheticState
@@ -3117,7 +3499,7 @@ function Invoke-SelfTest {
     $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
     Assert-That 'Plain-text report is produced' ($textReport.Length -gt 1500) ('{0} bytes' -f $textReport.Length)
     Assert-That 'Text report states the CIS hive caveat' ($textReport -match 'Group Policy hive')
-    Assert-That 'Text report includes the score' ($textReport -match 'SECURITY SCORE')
+    Assert-That 'Text report includes the score' ($textReport -match 'APPLICABLE PROTECTION SCORE')
     Assert-That 'Text report includes DEP' ($textReport -match 'DEP')
 
     Set-RegistryProvider (New-RegistryProvider)
@@ -3138,14 +3520,15 @@ function Invoke-SelfTest {
 function Show-Summary {
     param($State, $Statuses, $Score, $SecuredCore)
 
-    Write-Section 'Security score'
+    Write-Section 'Applicable protection score'
     $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
+    Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
     if ($Score.ExcludedCount -gt 0) {
-        Write-Line ('{0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
+        Write-Line ('{0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
     }
 
     if ($State.HypervisorLaunch.BlocksVbs) {
@@ -3323,6 +3706,7 @@ function Write-RmmOutput {
         warnings = @($script:Warnings).Count
         exitCode = $script:ExitCode
     }
+    $script:RmmOutputWritten = $true
     Write-Output ($payload | ConvertTo-Json -Depth 8 -Compress)
 }
 
@@ -3341,7 +3725,7 @@ function Wait-ForKey {
 function Show-Menu {
     param($Statuses, $Score)
     Write-Host ''
-    Write-Line ('{0} {1}   security score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
+    Write-Line ('{0} {1}   applicable protection score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
     Write-Host ''
     Write-Line '  [1] Re-check this computer' 'Plain'
     Write-Line '  [2] Fix what can be fixed safely' 'Plain'
@@ -3417,28 +3801,25 @@ function Show-Explanation {
 function Invoke-Interactive {
     param($State)
 
-    $statuses = Get-AllControlStatus -State $State
-    $score = Get-SecurityScore -Statuses $statuses
-    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
+    $assessment = Get-Assessment -State $State
 
-    Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-    Show-NextSteps -Explanations $explanations
+    Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+    Show-NextSteps -Explanations $assessment.Explanations
 
+    $changed = $false
     while ($true) {
-        Show-Menu -Statuses $statuses -Score $score
+        Show-Menu -Statuses $assessment.Statuses -Score $assessment.Score
         $choice = Read-Choice '12345Q'
 
         if ($choice -eq 'Q') {
             # No second full audit when nothing changed: the state we have is still true.
-            if (@($script:AppliedChanges).Count -eq 0) {
+            if (-not $changed) {
                 Write-Line ''
                 Write-Line 'No changes were made to this computer.' 'Dim'
                 if ($State.Restart.Pending) { Write-Line 'Note: Windows has its own restart pending, unrelated to this tool.' 'Dim' }
                 return
             }
-            $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+            $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
             foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
             if ($script:RestartRequired) {
                 Write-Line ''
@@ -3450,16 +3831,13 @@ function Invoke-Interactive {
         switch ($choice) {
             '1' {
                 $State = Get-SystemState -Volatile
-                $statuses = Get-AllControlStatus -State $State
-                $score = Get-SecurityScore -Statuses $statuses
-                $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-                $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-                $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
-                Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-                Show-NextSteps -Explanations $explanations
+                $assessment = Get-Assessment -State $State
+                Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+                Show-NextSteps -Explanations $assessment.Explanations
             }
             '2' {
                 $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $State
+                if ($result.ChangeCount -gt 0) { $changed = $true }
                 Write-Section 'Result'
                 if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                 foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
@@ -3469,8 +3847,7 @@ function Invoke-Interactive {
                     Write-Line ('Restart required. Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info'
                 }
                 $State = Get-SystemState -Volatile
-                $statuses = Get-AllControlStatus -State $State
-                $score = Get-SecurityScore -Statuses $statuses
+                $assessment = Get-Assessment -State $State
             }
             '3' {
                 $id = Select-ControlInteractive
@@ -3487,7 +3864,7 @@ function Invoke-Interactive {
                 $script:HtmlSelected = [bool]($fmt -eq '1' -or $fmt -eq '4')
                 $script:TextSelected = [bool]($fmt -eq '2' -or $fmt -eq '4')
                 $script:JsonSelected = [bool]($fmt -eq '3' -or $fmt -eq '4')
-                $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
+                $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
                 foreach ($p in $paths) { Write-Line ('Saved: {0}' -f $p) 'Good' }
             }
             '5' {
@@ -3498,14 +3875,14 @@ function Invoke-Interactive {
                     'B' {
                         $id = Select-ControlInteractive
                         if ($id) {
-                            $result = Invoke-ControlApply -Ids @($id) -State $State
+                            $result = Invoke-ControlApply -Ids @($id) -State $State -ExplicitIds @($id)
+                            if ($result.ChangeCount -gt 0) { $changed = $true }
                             Write-Section 'Result'
                             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
                             foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
                             $State = Get-SystemState -Volatile
-                            $statuses = Get-AllControlStatus -State $State
-                            $score = Get-SecurityScore -Statuses $statuses
+                            $assessment = Get-Assessment -State $State
                         }
                     }
                     'C' {
@@ -3517,14 +3894,15 @@ function Invoke-Interactive {
                             $rid = Read-Host 'Run id to undo (blank to cancel)'
                             if (-not [string]::IsNullOrWhiteSpace($rid)) {
                                 $rev = Invoke-ControlRevert -RunId $rid.Trim()
+                                if ($rev.ChangeCount -gt 0) { $changed = $true }
+                                foreach ($conflict in $rev.Conflicts) { Write-Line $conflict.Reason 'Warn'; Add-Warning $conflict.Reason }
                                 Write-Line ('Reverted {0} change(s).' -f $rev.ChangeCount) 'Good'
                                 $State = Get-SystemState -Volatile
-                                $statuses = Get-AllControlStatus -State $State
-                                $score = Get-SecurityScore -Statuses $statuses
+                                $assessment = Get-Assessment -State $State
                             }
                         }
                     }
-                    'D' { Show-CisSummary -Cis $cis }
+                    'D' { Show-CisSummary -Cis $assessment.Cis }
                     'E' {
                         try { Start-Process 'windowsdefender://coreisolation' | Out-Null; Write-Line 'Opened Windows Security.' 'Good' }
                         catch { Write-Line 'Could not open Windows Security.' 'Warn' }
@@ -3573,6 +3951,20 @@ function Invoke-Main {
         $script:ExitCode = 1; return
     }
 
+    if (($EnableAllSafe -and $Enable) -or ($Revert -and ($EnableAllSafe -or $Enable)) -or ($Explain -and ($EnableAllSafe -or $Enable -or $Revert)) -or ($RunId -and -not $Revert)) {
+        Write-Line 'Use one change mode at a time; -RunId requires -Revert and -Explain cannot be combined with changes.' 'Bad'
+        $script:ExitCode = 1; return
+    }
+    if ($Enable) { $Enable = @($Enable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    foreach ($controlId in (ConvertTo-Array $Enable)) {
+        if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+        if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+    }
+    if ($Explain -and -not (Test-Contains (Get-ControlIds) $Explain.Trim().ToLowerInvariant())) {
+        Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
+        $script:ExitCode = 1; return
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($DebugLogPath)) {
         $script:DebugEnabled = $true
         $script:DebugPath = $DebugLogPath
@@ -3582,7 +3974,7 @@ function Invoke-Main {
     if (-not (Test-IsElevated)) {
         # Try to elevate ourselves first. Telling a non-technical user to "run as
         # administrator" and exiting is not a workable instruction for this audience.
-        if (Request-Elevation -Bound $PSBoundParameters) { return }
+        if (Request-Elevation -Bound $script:InvocationParameters) { return }
         Write-Line 'WinDSH needs to run as Administrator to read platform security state.' 'Bad'
         Write-Line 'Right-click PowerShell, choose "Run as administrator", then run it again.' 'Info'
         Write-Line 'Or use Run-WinDSH-AsAdmin.bat, which requests elevation for you.' 'Info'
@@ -3612,86 +4004,113 @@ function Invoke-Main {
         $script:ExitCode = 0; return
     }
 
+    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Revert -or $Rmm)
+    $script:Unattended = $unattended
     if ($Revert) {
         if (-not $script:RemediationAllowed) { Write-Line 'Revert is disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
         try {
             $result = Invoke-ControlRevert -RunId $RunId
             Write-Section 'Revert'
             foreach ($r in $result.Reverted) { Write-Line ('{0}\{1} restored to {2}' -f $r.Path, $r.Name, $r.RestoredTo) 'Good' 2 }
-            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Good'
-            $script:ExitCode = $(if ($result.RestartRequired) { 3010 } else { 0 }); return
+            foreach ($conflict in $result.Conflicts) {
+                $message = '{0}\{1}: {2}' -f $conflict.Path, $conflict.Name, $conflict.Reason
+                Write-Line $message 'Warn'; Add-Warning $message
+            }
+            if ($result.Conflicts.Count -gt 0) { $script:ExitCode = 5 }
+            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Info'
         }
         catch {
-            Write-Line ('Revert failed: {0}' -f $_.Exception.Message) 'Bad'
-            $script:ExitCode = 5; return
+            Add-Warning ('Revert failed: {0}' -f $_.Exception.Message)
+            $script:ExitCode = 5
         }
+        $State = Get-SystemState -Volatile
     }
-
-    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Rmm)
-    # Confirm-Action reads this: prompts are interactive-only, because a prompt on an
-    # unattended run would hang waiting for a user who is not there.
-    $script:Unattended = $unattended
-
-    if ($EnableAllSafe -or $Enable) {
+    elseif ($EnableAllSafe -or $Enable) {
         if (-not $script:RemediationAllowed) { Write-Line 'Changes are disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
         $ids = if ($Enable) { @($Enable) } else { $script:SafeControlSet }
-        foreach ($id in $ids) {
-            if (-not (Test-Contains (Get-ControlIds) $id)) { Write-Line ('Unknown control "{0}".' -f $id) 'Bad'; $script:ExitCode = 1; return }
-        }
-
-        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State) }
+        if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State -ExplicitIds @($Enable)) }
         else {
-            $result = Invoke-ControlApply -Ids $ids -State $State
-            Write-Section 'Changes'
-            if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
-            foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
-            foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
-            if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            try {
+                $result = Invoke-ControlApply -Ids $ids -State $State -ExplicitIds @($Enable)
+                Write-Section 'Changes'
+                if ($result.ChangeCount -eq 0 -and $result.Skipped.Count -eq 0) { Write-Line 'No changes were needed.' 'Good' }
+                elseif ($result.ChangeCount -eq 0) { Write-Line 'No changes were made; see the skipped protections below.' 'Warn' }
+                foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
+                foreach ($skip in $result.Skipped) {
+                    $message = 'Skipped {0}: {1}' -f $skip.ControlName, $skip.Reason
+                    Write-Line $message 'Warn'; Add-Warning $message
+                }
+                if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            }
+            catch {
+                Add-Warning ('Remediation stopped: {0}' -f $_.Exception.Message)
+                $script:ExitCode = 1
+            }
             $State = Get-SystemState -Volatile
         }
     }
 
-    $statuses = Get-AllControlStatus -State $State
-    $score = Get-SecurityScore -Statuses $statuses
-    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
-
+    $assessment = Get-Assessment -State $State
     if ($Rmm) {
-        if ($script:RestartRequired) { $script:ExitCode = 3010 }
-        Write-RmmOutput -State $State -Statuses $statuses -Score $score -Cis $cis
-        $script:ExitCode = $script:ExitCode; return
+        # Automation writes files only when a format was explicitly selected.
+        if ($HtmlReport -or $JsonReport -or $TextReport) {
+            [void](Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
+        }
     }
-
-    if ($unattended) {
-        Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-        Show-NextSteps -Explanations $explanations
-        if ($Advanced) { Show-CisSummary -Cis $cis }
-        $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+    elseif ($unattended) {
+        Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+        Show-NextSteps -Explanations $assessment.Explanations
+        if ($Advanced) { Show-CisSummary -Cis $assessment.Cis }
+        $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
         foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
     }
-    else {
-        Invoke-Interactive -State $State
-    }
+    else { Invoke-Interactive -State $State }
 
+    $script:ExitCode = Get-FinalExitCode
+    if ($AutoReboot -and $script:ExitCode -eq 3010 -and -not $WhatIfPreference) {
+        try { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force -ErrorAction Stop }
+        catch { Add-Warning ('Automatic restart failed: {0}' -f $_.Exception.Message); $script:ExitCode = 1 }
+    }
+    if ($Rmm) {
+        Write-RmmOutput -State $State -Statuses $assessment.Statuses -Score $assessment.Score -Cis $assessment.Cis
+        return
+    }
     foreach ($w in $script:Warnings) { Write-Line $w 'Warn' }
-
-    if ($unattended -and -not $Rmm) {
-        $final = if ($script:RestartRequired) { 3010 } elseif ($script:ExitCode -ne 0) { $script:ExitCode } elseif (@($script:Warnings).Count -gt 0) { 2 } else { 0 }
+    if ($unattended) {
         Write-Line ''
-        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $final)) 'Dim'
+        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $script:ExitCode)) 'Dim'
     }
-
-    if ($script:RestartRequired) {
-        if ($AutoReboot) { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force; $script:ExitCode = 3010; return }
-        $script:ExitCode = 3010; return
-    }
-    if ($script:ExitCode -ne 0) { $script:ExitCode = $script:ExitCode; return }
-    if (@($script:Warnings).Count -gt 0) { $script:ExitCode = 2; return }
-    $script:ExitCode = 0; return
 }
 
-# Invoke-Main sets $script:ExitCode itself. Its output is NOT captured, so RMM mode
-# can emit its JSON object on stdout for a pipeline to consume.
-Invoke-Main
+function Get-FinalExitCode {
+    # A partial failure must not be hidden behind a restart-required success code.
+    if ($script:ExitCode -ne 0) { return $script:ExitCode }
+    if ($script:RestartRequired) { return 3010 }
+    if (@($script:Warnings).Count -gt 0) { return 2 }
+    return 0
+}
+
+function Invoke-EntryPoint {
+    $script:RmmOutputWritten = $false
+    $failureMessage = $null
+    try { Invoke-Main }
+    catch {
+        $script:ExitCode = 1
+        $failureMessage = $_.Exception.Message
+        if (-not $Rmm) { Write-Line ('WinDSH failed: {0}' -f $failureMessage) 'Bad' }
+    }
+    # Validation/elevation failures return before assessment. Automation still gets
+    # one JSON result rather than a silent exit or mixed diagnostic output.
+    if ($Rmm -and -not $script:RmmOutputWritten -and -not ($Version -or $ListControls -or $SelfTest)) {
+        if (-not $failureMessage) { $failureMessage = Get-ExitCodeMeaning -Code $script:ExitCode }
+        Write-Output (([pscustomobject]@{
+            schemaVersion = $script:SchemaVersion; tool = $script:ToolName
+            version = $script:ToolVersion; exitCode = $script:ExitCode
+            restartRequired = $script:RestartRequired; error = $failureMessage
+        }) | ConvertTo-Json -Compress)
+    }
+}
+
+# Invoke-Main sets its exit code; do not capture stdout in the entry point.
+Invoke-EntryPoint
 exit $script:ExitCode

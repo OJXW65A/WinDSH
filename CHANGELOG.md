@@ -1,5 +1,27 @@
 # WinDSH changelog
 
+## Unreleased — audit safety fixes
+
+- Separate safe-set intent from explicit control selection. HVCI preflight fails closed
+  on inaccessible logs; known incompatibilities require real interactive typed consent.
+  Preview includes preflight and dependency blockers.
+- Make rollback conflict-aware, type-aware, and non-repeatable. Track completed writes
+  and restored entries, serialize operations, validate catalog targets, protect journal
+  permissions, and preserve ambiguous interrupted writes for manual review.
+- Ignore inherited journal path overrides in production.
+- Declare platform requirements per control so DEP does not inherit VBS requirements.
+- Refresh status, score, CIS, Secured-core, and explanations as one assessment after changes.
+- Preserve command-line intent through elevation; test native Windows argv round-trips.
+- Support explicitly selected RMM report formats and consistent process/JSON exit codes;
+  do not mask partial failures with restart success.
+- Clarify applicable-score semantics and synchronize README/CONTRIBUTING with the CLI,
+  including current process-scoped launcher policy without changing that behavior.
+- Pin GitHub Actions to commit SHAs and PSGallery packages to verified SHA-256 hashes;
+  remove the unused release dry-run input and add dependency update configuration.
+- Expand rollback, preflight, interactive, automation, native-argv, and disposable-key
+  Windows provider regression coverage. Hardware-affecting remediation remains a manual
+  test on representative systems before release.
+
 ## v2.0.0
 
 Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new internals.

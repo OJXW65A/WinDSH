@@ -1,0 +1,10 @@
+{
+  "Pester": {
+    "version": "5.9.1",
+    "sha256": "8dd4060fc3bc895f05bd655e4ab82abe346de54a4e6415dfb727cc8378672b69"
+  },
+  "PSScriptAnalyzer": {
+    "version": "1.24.0",
+    "sha256": "e86c97d44bb1bc8a1de35e753b85ea1d938f6f9f881639a181507e079bca4556"
+  }
+}
