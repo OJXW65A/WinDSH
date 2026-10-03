@@ -187,7 +187,8 @@ You can run PSScriptAnalyzer locally with:
 
 ```powershell
 Install-Module PSScriptAnalyzer -Scope CurrentUser
-Invoke-ScriptAnalyzer -Path .\WinDSH.ps1
+Invoke-ScriptAnalyzer -Path .\src -Recurse
+Invoke-ScriptAnalyzer -Path .\build
 ```
 
 Warnings should be reviewed. New analyzer errors should not be introduced.
@@ -265,9 +266,11 @@ The repository `.gitignore` excludes common generated files.
 ## Releases
 
 Releases are produced only by `.github/workflows/release.yml`, triggered by pushing a
-tag such as `v1.5.1`. The workflow verifies the integrity hash, checks the tag matches
+tag matching the script version, such as `v2.0.0`. The workflow verifies the integrity hash, checks the tag matches
 `$script:ToolVersion`, runs the tests, builds the artifact set, generates `SHA256SUMS`,
 and opens a draft GitHub Release.
+
+The [release process](docs/RELEASING.md) covers validation, packaging, and publication.
 
 Do not hand-upload release assets. An artifact that was not built by the workflow cannot
 be attested and breaks the chain between the published file and this source.

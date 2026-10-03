@@ -124,17 +124,17 @@ signal for every other program, forever.
 The maintainer has **not decided**. Do not quietly revert it and do not quietly enshrine
 it. If the launcher comes up, ask.
 
-## Known untested surface
+## Validation status
 
-v2.0.0 was developed and tested on Linux PowerShell 7. These paths have **never executed
-on Windows**:
+CI runs on Windows and checks Windows PowerShell 5.1 and PowerShell 7 parsing,
+PSScriptAnalyzer, synthetic self-tests, native child-process argument binding,
+apply/revert on a disposable Windows registry key, and live audit/RMM/WhatIf smoke
+runs. `build/Build-WinDSH.ps1 -Check` verifies the generated script and integrity hash.
 
-- `bcdedit /enum {current}` — hypervisor launch type
-- `Get-WinEvent` on CodeIntegrity/Operational — Event ID 3087 diagnostics
-- `Win32_EncryptableVolume` — BitLocker warning
-- `Get-AuthenticodeSignature` / `Win32_SystemDriver` — driver enrichment
-- `shutdown /r /fw` — restart into firmware
-- `Get-Tpm`, `Confirm-SecureBootUEFI`, `Win32_DeviceGuard`
-- Windows PowerShell 5.1 itself
+These checks do not prove firmware-dependent behavior on physical hardware.
+Before a public release, manually validate interactive remediation and rollback on
+representative supported Windows systems, real TPM/Secure Boot states, a blocking
+Code Integrity event 3087, organization execution policies, and restart into firmware.
+Record what was tested; do not describe all Windows paths as either untested or proven.
 
-Verify these on a real machine before trusting v2 over v1.5.0.
+See [the release process](docs/RELEASING.md) for the release and maintenance steps.

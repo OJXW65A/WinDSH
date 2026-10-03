@@ -106,3 +106,4 @@ For PowerShell releases, the signature can be inspected with:
 
 ```powershell
 Get-AuthenticodeSignature .\WinDSH.ps1
+```
