@@ -9,29 +9,24 @@ comparison with CIS Device Guard policy settings.
 
 **Contact:** windsh@rootauthority.com
 
-**Version status:** `main` contains v2.0.0 development code. The latest published
-release is currently v1.5.0. The examples below describe v2; see the
-[v1.5.0 README](https://github.com/OJXW65A/WinDSH/blob/v1.5.0/README.md)
-for the released version.
+**Version:** v2.0.0. The examples below describe this version; documentation for
+older releases is available from their matching tags.
 
 ## Download
 
-**[Download the latest public release](https://github.com/OJXW65A/WinDSH/releases/latest)**
+**[Download WinDSH.zip](https://github.com/OJXW65A/WinDSH/releases/latest/download/WinDSH.zip)**
 
-Download the ZIP from the release page, right-click it, choose **Extract All**,
-then open the folder containing **WinDSH.ps1** and double-click
-**Run-WinDSH-AsAdmin.bat**.
-Approve the administrator prompt and keep the launcher beside **WinDSH.ps1**.
+One download contains only the two files needed to run WinDSH:
 
-The next release will include **WinDSH.zip**, containing only these two files.
-The ZIP is not yet a published release asset.
+- `Run-WinDSH-AsAdmin.bat`
+- `WinDSH.ps1`
 
-To test the v2 development version now, download both files into the same folder:
+Right-click **WinDSH.zip**, choose **Extract All**, open the extracted folder,
+and double-click **Run-WinDSH-AsAdmin.bat**. Approve the administrator prompt.
+Keep the launcher beside **WinDSH.ps1**.
 
-- [Run-WinDSH-AsAdmin.bat](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/Run-WinDSH-AsAdmin.bat)
-- [WinDSH.ps1](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/WinDSH.ps1)
-
-If a file opens as text, right-click its link and choose **Save link as...**.
+[Release notes and SHA-256 checksums](https://github.com/OJXW65A/WinDSH/releases/latest)
+are available on the release page.
 
 ## Requirements
 
