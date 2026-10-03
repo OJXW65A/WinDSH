@@ -1,7 +1,7 @@
 # WinDSH v2 usage
 
-This guide describes the v2.0.0 development version on `main`. For published
-releases, use the documentation from the matching release tag.
+This guide describes WinDSH v2.0.0. For other versions, use the documentation
+from the matching release tag.
 
 [Back to the README](../README.md)
 

@@ -1,6 +1,6 @@
 # WinDSH changelog
 
-## v2.0.0 — Unreleased
+## v2.0.0 — 2026-10-03
 
 Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new internals.
 
@@ -9,6 +9,8 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 - Add `WinDSH.zip` to release assets, containing only `Run-WinDSH-AsAdmin.bat` and
   `WinDSH.ps1`, with SHA-256 checksums and build provenance. Document extraction
   and launch steps in the public download section.
+- Allow maintainers to build a verified draft release and version tag from the
+  GitHub website without manually uploading release assets.
 
 - **Security score out of 100** with a grade, weighted across the controls this machine
   can actually run. Controls the hardware cannot support are excluded from the total
@@ -96,25 +98,130 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 ### Maintenance
 
 - Separate the public quick start from the detailed usage guide and document the
-  release process. Correct stale validation and signing statements.
-- Add issue and pull request templates, editor/line-ending settings, and syntax
-  coverage for build and test scripts. Remove the unused duplicate QR image.
-- Include the MIT notice in the distributable script while keeping the public ZIP
-  limited to the launcher and application. Align the control catalog output.
+  rele…1813 tokens truncated…atIf` makes no registry changes
+- safety-gating preflight, conflict-aware rollback, and interactive assessment refresh
+- actual native Windows child-process argument binding on both runtimes
+- real Windows registry apply/revert on a disposable test key
 
-### Unchanged by design
+All CI jobs should pass before a pull request is considered ready.
 
-- No BitLocker or encryption management. BitLocker status is read only, to warn before
-  firmware changes.
-- No TPM clearing, no Secure Boot key changes, no antivirus modification, no policy bypass.
-- The Group Policy hive is never written. Policy-managed values are detected and left alone.
-- No network access, no encoded commands, no remote downloads.
-- The self-integrity check detects accidental corruption and is not a security boundary.
-- WinDSH is not code signed. See `CODE_SIGNING_POLICY.md`.
+## PSScriptAnalyzer
 
-## v1.5.0 — 2026-09-09
+You can run PSScriptAnalyzer locally with:
 
-First public release. Includes Windows platform security auditing, interactive
-remediation, preview mode, text/JSON reports, RMM output, and PowerShell 5.1 support.
+```powershell
+Install-Module PSScriptAnalyzer -Scope CurrentUser
+Invoke-ScriptAnalyzer -Path .\src -Recurse
+Invoke-ScriptAnalyzer -Path .\build
+```
 
-See the [v1.5.0 release notes](https://github.com/OJXW65A/WinDSH/releases/tag/v1.5.0).
+Warnings should be reviewed. New analyzer errors should not be introduced.
+
+## Preview changes before remediation
+
+When modifying remediation logic, test preview behavior first:
+
+```powershell
+.\WinDSH.ps1 -EnableAllSafe -WhatIf
+```
+
+`-WhatIf` must not change Windows security settings.
+
+Changes affecting remediation should be tested on representative Windows systems
+before broad use.
+
+## Pull requests
+
+Keep pull requests focused on one logical change where practical.
+
+A pull request should explain:
+
+- what problem it solves;
+- what behavior changes;
+- whether registry or security settings are affected;
+- how it was tested;
+- whether a restart may be required;
+- any Windows-version, edition, firmware, or hardware assumptions.
+
+If the contribution changes user-visible behavior, update the relevant
+documentation.
+
+If it fixes a bug, add or update a regression test when practical.
+
+## Commit messages
+
+Use concise, descriptive commit messages.
+
+Examples:
+
+```text
+Fix empty firmware action handling
+Add Secure Launch capability test
+Improve HVCI diagnostic reporting
+Update PowerShell 5.1 regression tests
+```
+
+## Coding style
+
+Prefer:
+
+- built-in Windows and PowerShell interfaces;
+- clear function names;
+- approved PowerShell verbs where practical;
+- explicit error handling;
+- debug logging for optional provider failures;
+- human-readable output for non-technical users;
+- structured output for automation.
+
+Avoid unnecessary external dependencies.
+
+## Generated files
+
+Do not commit generated content such as:
+
+- WinDSH debug logs
+- local reports
+- release ZIP archives
+- temporary files
+- test-result output
+
+The repository `.gitignore` excludes common generated files.
+
+## Releases
+
+Releases are produced only by `.github/workflows/release.yml`, triggered by pushing a
+tag matching the script version, such as `v2.0.0`, or by explicitly requesting a draft
+from `main` with **Run workflow**. The workflow verifies the integrity hash, checks the tag matches
+`$script:ToolVersion`, runs the tests, builds the artifact set, generates `SHA256SUMS`,
+and opens a draft GitHub Release.
+
+The [release process](docs/RELEASING.md) covers validation, packaging, and publication.
+
+Do not hand-upload release assets. An artifact that was not built by the workflow cannot
+be attested and breaks the chain between the published file and this source.
+
+## Code signing
+
+Do not add private keys, signing credentials, API tokens, certificate passwords,
+or signing-service secrets to the repository.
+
+WinDSH is currently unsigned. Signing status and policy are described in
+[CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
+
+## License
+
+By contributing to WinDSH, you agree that your contribution may be distributed
+under the repository's [MIT License](LICENSE).
+
+## Repository protection
+
+The repository administrator should protect `main` with required pull requests and
+required checks: `Workflow files are valid`, `Built file is current`, `Windows PowerShell 5.1`,
+`PowerShell 7`, and `Live audit smoke test`. Require the branch to be up to date and
+prevent force pushes/deletion. This is a GitHub settings change; committing this document
+alone does not enable enforcement. Do not require approvals from other people unless
+there are reviewers available, or a single-maintainer project will be unable to merge.
+
+CI actions are pinned to full commit SHAs and PSGallery packages are pinned by version
+and SHA-256 in `.github/psgallery-lock.json`. Review the upstream revision/package when
+updating a pin. Dependabot proposes action updates; package hashes require explicit review.
