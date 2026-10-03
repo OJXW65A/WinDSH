@@ -266,7 +266,8 @@ The repository `.gitignore` excludes common generated files.
 ## Releases
 
 Releases are produced only by `.github/workflows/release.yml`, triggered by pushing a
-tag matching the script version, such as `v2.0.0`. The workflow verifies the integrity hash, checks the tag matches
+tag matching the script version, such as `v2.0.0`, or by explicitly requesting a draft
+from `main` with **Run workflow**. The workflow verifies the integrity hash, checks the tag matches
 `$script:ToolVersion`, runs the tests, builds the artifact set, generates `SHA256SUMS`,
 and opens a draft GitHub Release.
 
