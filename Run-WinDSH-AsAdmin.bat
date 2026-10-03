@@ -67,7 +67,10 @@ REM  and before being asked to approve a UAC prompt that could not have helped.
 if errorlevel 20 goto BLOCKED
 
 REM --- Are we already running with Administrator rights? ---------------------
-net session >nul 2>&1
+REM  Check the access token directly. NET SESSION also requires the Server
+REM  service, so its failure does not reliably mean the user is unelevated.
+"%PSEXE%" -NoLogo -NoProfile -Command "try { $identity=[Security.Principal.WindowsIdentity]::GetCurrent(); try { $principal=New-Object Security.Principal.WindowsPrincipal($identity); if($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 0}; exit 1 } finally { $identity.Dispose() } } catch { exit 2 }"
+if errorlevel 2 goto TOKENCHECKFAILED
 if not errorlevel 1 goto RUN
 
 REM --- Not elevated: relaunch this launcher through UAC ----------------------
@@ -75,11 +78,13 @@ echo   WinDSH needs Administrator rights to read device security settings.
 echo   A User Account Control prompt will appear. Choose Yes to continue.
 echo.
 
-"%PSEXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath $env:WINDSH_SELF -Verb RunAs -ErrorAction Stop; exit 0 } catch { exit 1 }"
+"%PSEXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "try { $process=Start-Process -FilePath $env:WINDSH_SELF -Verb RunAs -Wait -PassThru -ErrorAction Stop; exit $process.ExitCode } catch { exit 1223 }"
+set "RC=%errorlevel%"
 
-if errorlevel 1 (
+REM  Keep UAC failures separate from exit codes returned by the application.
+if "%RC%"=="1223" (
     echo.
-    echo   Elevation was cancelled, so WinDSH did not run.
+    echo   Elevation was cancelled or failed, so WinDSH did not run.
     echo.
     echo   If you cannot approve the prompt, ask whoever administers this
     echo   computer to run it for you.
@@ -87,7 +92,14 @@ if errorlevel 1 (
     pause
     exit /b 4
 )
-exit /b 0
+exit /b %RC%
+
+:TOKENCHECKFAILED
+echo   PROBLEM: Windows could not verify Administrator rights.
+echo   Close this window and run the launcher as Administrator, or ask your IT administrator.
+echo.
+pause
+exit /b 4
 
 REM --- Elevated: run the script ---------------------------------------------
 :RUN
