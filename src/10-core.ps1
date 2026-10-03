@@ -27,13 +27,13 @@
     Report only. Makes no changes. Cannot be combined with a remediation switch.
 
 .PARAMETER EnableAllSafe
-    Unattended: apply the conservative recommended set.
+    Unattended: apply the conservative set; skip failed or unknown compatibility checks.
 
 .PARAMETER Enable
-    Unattended: apply specific controls by id (see -ListControls).
+    Unattended: apply specific controls by id. Typed safety overrides remain interactive.
 
 .PARAMETER Revert
-    Undo a previous run. Use -RunId, or the most recent run when omitted.
+    Undo completed writes still matching current state. Defaults to the newest open run.
 
 .PARAMETER RunId
     The change-journal run to revert.
@@ -45,7 +45,7 @@
     Explain one control by id and exit, e.g. -Explain secure-launch.
 
 .PARAMETER HtmlReport
-    Write an HTML report with a security score.
+    Write an HTML report with an applicable protection score.
 
 .PARAMETER JsonReport
     Write a machine-readable JSON report.
@@ -60,7 +60,7 @@
     Where reports are written. Defaults to a WinDSH folder on the Desktop.
 
 .PARAMETER Rmm
-    Emit one compact JSON object on stdout. Implies unattended and no console output.
+    Emit one compact JSON object on stdout. Explicit report-format switches also write files.
 
 .PARAMETER Advanced
     Show full technical detail in the console instead of the plain-language summary.
@@ -83,11 +83,11 @@
 .NOTES
     Exit codes:
       0    success, no restart required
-      1    invalid usage or startup failure
+      1    invalid usage, startup/runtime failure, or remediation error
       2    audit or remediation completed with warnings
       3    self-integrity check failed; remediation disabled
       4    elevation required
-      5    revert failed
+      5    revert failed or conflicted
       3010 success, restart required
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -401,11 +401,11 @@ function Get-ExitCodeMeaning {
     param([int]$Code)
     switch ($Code) {
         0    { 'Completed successfully. No restart needed.' }
-        1    { 'Could not start: the options given were not valid.' }
+        1    { 'Invalid options, startup/runtime failure, or remediation error.' }
         2    { 'Completed, but with warnings.' }
         3    { 'The file failed its integrity check, so changes were disabled.' }
         4    { 'Administrator rights were required but not available.' }
-        5    { 'The undo operation failed.' }
+        5    { 'The undo operation failed or has unresolved conflicts.' }
         3010 { 'Completed. Windows must restart for the changes to take effect.' }
         default { 'Unrecognised exit code {0}.' -f $Code }
     }

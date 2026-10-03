@@ -43,7 +43,7 @@ For a bug report, include as much of the following as possible:
 To create a debug log:
 
 ```powershell
-.\WinDSH.ps1 -DebugLog
+.\WinDSH.ps1 -AuditOnly -DebugLogPath "C:\Temp\WinDSH-Debug.log"
 ```
 
 Review debug logs before posting them publicly and remove any information you do
@@ -128,6 +128,9 @@ Verify without writing:
 
 ## Adding a control
 
+Declare `PlatformRequirements` explicitly for every control; prerequisites are not inferred
+from category or control ID.
+
 Settings are declarative. A new control is **one entry in `src/20-catalog.ps1`**, not
 edits across several functions. Audit, preview, apply, revert, scoring, CIS comparison,
 the explainer and all report formats read that entry.
@@ -172,6 +175,9 @@ The GitHub Actions CI workflow also checks:
 - a live `-AuditOnly` run produces a structurally valid JSON report
 - `-RMM` emits exactly one JSON object on stdout
 - `-EnableAllSafe -WhatIf` makes no registry changes
+- safety-gating preflight, conflict-aware rollback, and interactive assessment refresh
+- actual native Windows child-process argument binding on both runtimes
+- real Windows registry apply/revert on a disposable test key
 
 All CI jobs should pass before a pull request is considered ready.
 
@@ -278,3 +284,16 @@ WinDSH is currently unsigned. Signing status and policy are described in
 
 By contributing to WinDSH, you agree that your contribution may be distributed
 under the repository's [MIT License](LICENSE).
+
+## Repository protection
+
+The repository administrator should protect `main` with required pull requests and
+required checks: `Workflow files are valid`, `Built file is current`, `Windows PowerShell 5.1`,
+`PowerShell 7`, and `Live audit smoke test`. Require the branch to be up to date and
+prevent force pushes/deletion. This is a GitHub settings change; committing this document
+alone does not enable enforcement. Do not require approvals from other people unless
+there are reviewers available, or a single-maintainer project will be unable to merge.
+
+CI actions are pinned to full commit SHAs and PSGallery packages are pinned by version
+and SHA-256 in `.github/psgallery-lock.json`. Review the upstream revision/package when
+updating a pin. Dependabot proposes action updates; package hashes require explicit review.
