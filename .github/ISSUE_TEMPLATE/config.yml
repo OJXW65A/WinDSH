@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/OJXW65A/WinDSH/blob/main/SECURITY.md
+    about: Read the security policy and contact windsh@rootauthority.com instead of posting publicly.
+  - name: Usage and troubleshooting
+    url: https://github.com/OJXW65A/WinDSH/blob/main/docs/USAGE.md
+    about: Check the command reference, report behavior, and exit codes.

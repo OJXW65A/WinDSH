@@ -6,8 +6,8 @@ name: WinDSH Release
 #
 # To cut a release:
 #   1. Make sure main is green and the version in WinDSH.ps1 is correct.
-#   2. git tag -a v1.5.1 -m "WinDSH v1.5.1"
-#   3. git push origin v1.5.1
+#   2. Follow docs/RELEASING.md to tag the version declared by the built script.
+#   3. Review and publish the workflow-created draft release.
 
 on:
   push:
@@ -105,16 +105,23 @@ jobs:
               'LICENSE'
               'SECURITY.md'
               'CODE_SIGNING_POLICY.md'
+              'CONTRIBUTING.md'
+              'CLAUDE.md'
+              'docs/USAGE.md'
+              'docs/RELEASING.md'
+              'assets/bitcoin-qr.png'
           )
           foreach ($file in $payload) {
               if (-not (Test-Path -LiteralPath $file)) {
                   Write-Host "::error::Release payload file missing: $file"
                   exit 1
               }
-              Copy-Item -LiteralPath $file -Destination $stage -Force
+              $destination = Join-Path $stage $file
+              New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+              Copy-Item -LiteralPath $file -Destination $destination -Force
           }
 
-          Get-ChildItem $stage | Select-Object Name, Length | Format-Table -AutoSize
+          Get-ChildItem $stage -Recurse -File | Select-Object Name, Length | Format-Table -AutoSize
 
           $zip = "$env:GITHUB_WORKSPACE\dist\WinDSH-v$version.zip"
           Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
@@ -125,7 +132,6 @@ jobs:
           .\build\Build-Download.ps1 -OutputPath "$env:GITHUB_WORKSPACE\dist\WinDSH.zip"
 
           "stage=$stage" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "zip=$zip"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Generate SHA256SUMS
         shell: powershell
@@ -136,9 +142,10 @@ jobs:
           $sumsPath = "$dist\SHA256SUMS-WinDSH-v$version.txt"
 
           $lines = @()
-          foreach ($file in (Get-ChildItem $stage -File | Sort-Object Name)) {
+          foreach ($file in (Get-ChildItem $stage -Recurse -File | Sort-Object FullName)) {
               $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
-              $lines += ('{0}  {1}' -f $hash, $file.Name)
+              $relativePath = $file.FullName.Substring($stage.Length + 1) -replace '\\', '/'
+              $lines += ('{0}  {1}' -f $hash, $relativePath)
           }
           foreach ($zipFile in (Get-ChildItem $dist -Filter '*.zip' -File | Sort-Object Name)) {
               $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipFile.FullName).Hash.ToLowerInvariant()
@@ -158,24 +165,9 @@ jobs:
             dist/*.zip
             dist/SHA256SUMS-*.txt
 
-      # ------------------------------------------------------------------
-      # Authenticode signing goes here once a signing provider is in place.
-      # WinDSH is currently unsigned: the SignPath Foundation application was
-      # declined on public-visibility grounds. Whatever provider is used, the
-      # submitted artifact must be the one this workflow just built.
-      # Example shape for SignPath, kept for reference only:
-      #
-      # - name: Submit to SignPath for Authenticode signing
-      #   uses: signpath/github-action-submit-signing-request@v1
-      #   with:
-      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      #     organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-      #     project-slug: windsh
-      #     signing-policy-slug: release-signing
-      #     github-artifact-id: <artifact id>
-      #     wait-for-completion: true
-      #     output-artifact-directory: dist-signed
-      # ------------------------------------------------------------------
+      # Introduce Authenticode signing only when a provider is available. The
+      # final signed payload must be checksummed and attested after signing.
+      # Current artifacts are unsigned; do not claim signing sponsorship.
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -218,7 +210,7 @@ jobs:
             ### Code signing status
 
             This release is **not yet Authenticode signed**. Verify it using the SHA-256
-            checksums above. Authenticode signing through SignPath Foundation is planned.
+            checksums above. There is currently no signing certificate or sponsorship.
 
             The SHA-256 self-check inside WinDSH detects accidental corruption only. It is
             not a substitute for publisher authentication.

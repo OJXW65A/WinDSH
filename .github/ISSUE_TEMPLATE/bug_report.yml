@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a problem with WinDSH's audit, reports, launcher, or remediation.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. Report security vulnerabilities privately to
+        windsh@rootauthority.com; do not describe an exploitable issue in this public form.
+        Remove credentials, recovery keys, and sensitive device information from logs.
+  - type: input
+    id: version
+    attributes:
+      label: WinDSH version
+      description: Run .\WinDSH.ps1 -Version; include the commit if using development code.
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and build
+      placeholder: Windows 11 Pro, version 24H2, build 26100
+    validations:
+      required: true
+  - type: input
+    id: powershell
+    attributes:
+      label: PowerShell version
+      description: Use $PSVersionTable.PSVersion to find the version.
+      placeholder: Windows PowerShell 5.1 or PowerShell 7.x
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the command or menu action, whether it was elevated, and relevant hardware or policy details.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Include the error message or exit code, if available.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Optional, reviewed and redacted output. Do not attach unreviewed reports or debug logs.
+      render: text

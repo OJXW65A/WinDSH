@@ -19,7 +19,8 @@ for the released version.
 **[Download the latest public release](https://github.com/OJXW65A/WinDSH/releases/latest)**
 
 Download the ZIP from the release page, right-click it, choose **Extract All**,
-then open the extracted folder and double-click **Run-WinDSH-AsAdmin.bat**.
+then open the folder containing **WinDSH.ps1** and double-click
+**Run-WinDSH-AsAdmin.bat**.
 Approve the administrator prompt and keep the launcher beside **WinDSH.ps1**.
 
 The next release will include **WinDSH.zip**, containing only these two files.

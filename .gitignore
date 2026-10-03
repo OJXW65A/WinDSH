@@ -3,6 +3,7 @@ WinDSH-Reports/
 WinDSH-Debug-*.log
 
 # Release packages
+dist/
 *.zip
 
 # Test results

@@ -113,7 +113,8 @@ jobs:
           $failed = $false
           $targets = @(Get-ChildItem "$env:GITHUB_WORKSPACE\src" -Filter *.ps1) +
                      @(Get-Item "$env:GITHUB_WORKSPACE\WinDSH.ps1") +
-                     @(Get-Item "$env:GITHUB_WORKSPACE\build\Build-WinDSH.ps1")
+                     @(Get-ChildItem "$env:GITHUB_WORKSPACE\build" -Filter *.ps1) +
+                     @(Get-ChildItem "$env:GITHUB_WORKSPACE\tests" -Filter *.ps1)
           foreach ($t in $targets) {
               $parseErrors = $null
               [System.Management.Automation.Language.Parser]::ParseFile($t.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
