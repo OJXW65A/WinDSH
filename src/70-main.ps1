@@ -442,7 +442,10 @@ function Invoke-Main {
         Write-Line 'Use one change mode at a time; -RunId requires -Revert and -Explain cannot be combined with changes.' 'Bad'
         $script:ExitCode = 1; return
     }
-    if ($Enable) { $Enable = @($Enable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    if ($Enable) {
+        $Enable = @(ConvertTo-ControlIds -Ids $Enable)
+        $script:InvocationParameters['Enable'] = $Enable
+    }
     foreach ($controlId in (ConvertTo-Array $Enable)) {
         if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
         if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
@@ -469,8 +472,8 @@ function Invoke-Main {
     }
 
     $integrity = Get-SelfIntegrity
-    if ($integrity.Status -eq 'Failed') {
-        Write-Line 'Self-integrity check FAILED: this file does not match its recorded hash.' 'Bad'
+    if ($integrity.Status -ne 'OK') {
+        Write-Line ('Self-integrity could not be verified ({0}).' -f $integrity.Status) 'Bad'
         Write-Line 'Auditing will continue, but making changes is disabled. Download a fresh copy.' 'Warn'
         $script:RemediationAllowed = $false
         $script:ExitCode = 3
@@ -488,7 +491,7 @@ function Invoke-Main {
             $script:ExitCode = 1; return
         }
         Show-Explanation (Get-ControlExplanation -Id $id -State $State)
-        $script:ExitCode = 0; return
+        return
     }
 
     $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Revert -or $Rmm)

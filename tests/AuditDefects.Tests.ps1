@@ -25,6 +25,7 @@ Describe 'Audit defect regressions' {
         $script:RemediationAllowed = $true; $script:Unattended = $true
         $script:RestartRequired = $false; $script:AppliedChanges = @(); $script:RevertedChanges = @()
         $script:Warnings = @(); $script:ExitCode = 0; $script:UseColor = $false
+        $script:InvocationParameters = @{}
         $AuditOnly = $false; $Rmm = $false; $Revert = $false
         $EnableAllSafe = $false; $Enable = $null; $RunId = $null
         $NoReport = $true; $AutoReboot = $false; $Explain = $null
@@ -167,5 +168,114 @@ Describe 'Audit defect regressions' {
         (Invoke-ControlApply -Ids @('driver-blocklist') -State $testState).ChangeCount | Should -Be 0
         $script:Registry.Store[($script:RegCiConfig + '|VulnerableDriverBlocklistEnable')] | Should -Be 0
         @(Get-Journal).Count | Should -Be 0
+    }
+
+    It 'normalizes comma-separated and spaced IDs before native relaunch' -TestCases @(
+        @{ Ids = @(' HVCI, driver-blocklist ') }
+        @{ Ids = @(' HVCI ', ' driver-blocklist ') }
+        @{ Ids = @('hvci,driver-blocklist,hvci') }
+    ) {
+        param($Ids)
+        $argv = @(Get-RelaunchArgumentList -Bound @{ Enable = $Ids })
+        $argv.Count | Should -Be 2
+        $argv[0] | Should -Be '-Enable'
+        $argv[1] | Should -Be '"hvci,driver-blocklist"'
+    }
+
+    It 'forwards the same canonical Enable intent validated by main' {
+        $Enable = @(' HVCI, driver-blocklist ')
+        $script:InvocationParameters = @{ Enable = $Enable; ReportDirectory = 'C:\Reports with spaces' }
+        Mock Test-IsElevated { $false }
+        Mock Request-Elevation { $script:ForwardedArguments = $Bound; $true }
+        Invoke-Main
+        $script:ForwardedArguments.Enable -join ',' | Should -Be 'hvci,driver-blocklist'
+        $script:ForwardedArguments.ReportDirectory | Should -Be 'C:\Reports with spaces'
+    }
+
+    It 'rejects invalid native Enable content before it can cross elevation' -TestCases @(
+        @{ Ids = @('hvci,,driver-blocklist') }
+        @{ Ids = @('hvci,not-a-control') }
+        @{ Ids = @('hvci" -AutoReboot') }
+    ) {
+        param($Ids)
+        { Get-RelaunchArgumentList -Bound @{ Enable = $Ids } } | Should -Throw '*Unknown control*'
+    }
+
+    It 'disables changes for every unverified integrity status: <Status>' -TestCases @(
+        @{ Status = 'Failed' }, @{ Status = 'Error' }, @{ Status = 'Skipped' }
+        @{ Status = 'Unsigned' }, @{ Status = 'Unknown' }
+    ) {
+        param($Status)
+        Mock Get-SelfIntegrity { [pscustomobject]@{ Status = $Status } }
+        $Enable = @('driver-blocklist'); $Rmm = $true
+        $lines = @(Invoke-EntryPoint)
+        $lines.Count | Should -Be 1
+        ($lines[0] | ConvertFrom-Json).exitCode | Should -Be 3
+        $script:RemediationAllowed | Should -BeFalse
+        $script:Registry.Store.Count | Should -Be 0
+        Test-Path $script:TestJournalPath | Should -BeFalse
+    }
+
+    It 'blocks revert on unverified integrity without opening a journal' {
+        Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'Error' } }
+        $Revert = $true; $RunId = 'unused'; $Rmm = $true
+        $lines = @(Invoke-EntryPoint)
+        ($lines[0] | ConvertFrom-Json).exitCode | Should -Be 3
+        Test-Path $script:TestJournalPath | Should -BeFalse
+    }
+
+    It 'retains the integrity failure exit code during a read-only explanation' {
+        Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'Failed' } }
+        $Explain = 'driver-blocklist'
+        Invoke-Main
+        $script:ExitCode | Should -Be 3
+    }
+
+    It 'continues a read-only audit while reporting unverifiable integrity' {
+        Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'Error' } }
+        $AuditOnly = $true; $Rmm = $true
+        $lines = @(Invoke-EntryPoint)
+        $payload = $lines[0] | ConvertFrom-Json
+        $payload.exitCode | Should -Be 3
+        $payload.controls.Count | Should -Be 11
+        $script:Registry.Store.Count | Should -Be 0
+    }
+}
+
+Describe 'Self-integrity metadata validation' {
+    BeforeAll {
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/10-core.ps1'), [ref]$tokens, [ref]$parseErrors)
+        $integrityFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-SelfIntegrity' }, $true).Extent.Text
+        $PowerShellExe = (Get-Process -Id $PID).Path
+    }
+    It 'validates a complete marker and rejects <Mutation>' -TestCases @(
+        @{ Mutation = 'none'; Expected = 'OK' }
+        @{ Mutation = 'short'; Expected = 'Failed' }
+        @{ Mutation = 'nonhex'; Expected = 'Failed' }
+        @{ Mutation = 'missing'; Expected = 'Failed' }
+        @{ Mutation = 'duplicate'; Expected = 'Failed' }
+        @{ Mutation = 'placeholder'; Expected = 'Unsigned' }
+    ) {
+        param($Mutation, $Expected)
+        $placeholder = "`$script:ExpectedIntegrityHash = '{0}'" -f ('0' * 64)
+        $body = $placeholder + "`nfunction Write-DebugError {} `n" + $integrityFunction + "`nGet-SelfIntegrity | ConvertTo-Json -Compress`n"
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($body)))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        $marker = "`$script:ExpectedIntegrityHash = '$hash'"
+        $body = $body.Replace($placeholder, $marker)
+        switch ($Mutation) {
+            'short' { $body = $body.Replace($hash, $hash.Substring(0, 63)) }
+            'nonhex' { $body = $body.Replace($hash, ('z' * 64)) }
+            'missing' { $body = $body.Replace($marker, '') }
+            'duplicate' { $body = $marker + "`n" + $body }
+            'placeholder' { $body = $body.Replace($marker, $placeholder) }
+        }
+        $path = Join-Path $TestDrive ('integrity-{0}.ps1' -f $Mutation)
+        [IO.File]::WriteAllText($path, $body)
+        $lines = @(& $PowerShellExe -NoProfile -NonInteractive -File $path)
+        $LASTEXITCODE | Should -Be 0
+        ($lines[0] | ConvertFrom-Json).Status | Should -Be $Expected
     }
 }

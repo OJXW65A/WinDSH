@@ -149,7 +149,7 @@ $script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = '3fdc2691523b0e859d07a7b5c7d30ead6c1992b1ebddc184a1c42e38ec9071d3'
+$script:ExpectedIntegrityHash = 'f6cdd542be9188585d9b543c06628cd371a30506b2b0eb72c1978c33bd4cac81'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -455,20 +455,19 @@ function Get-RelaunchArgumentList {
     foreach ($key in $Bound.Keys) {
         if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
+        if ($key -eq 'Enable') {
+            $controlIds = @(ConvertTo-ControlIds -Ids @($value))
+            $list += '-Enable'
+            $list += ConvertTo-NativeArgument -Value ($controlIds -join ',')
+            continue
+        }
         if ($value -is [switch]) {
             # Windows PowerShell 5.1 -File cannot bind explicit switch booleans.
             # False switches keep their default by omission in a fresh child.
             if ($value.IsPresent) { $list += ('-{0}' -f $key) }
         }
         elseif ($value -is [array]) {
-            # powershell.exe -File does not bind several native argv elements to an
-            # array parameter. Enable uses one comma-separated string on relaunch.
-            if ($key -ne 'Enable') { throw 'Only the Enable parameter accepts an array.' }
-            foreach ($controlId in $value) {
-                if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control {0}.' -f $controlId) }
-            }
-            $list += '-Enable'
-            $list += ConvertTo-NativeArgument -Value ($value -join ',')
+            throw 'Only the Enable parameter accepts an array.'
         }
         elseif ($null -ne $value) {
             $list += ('-{0}' -f $key)
@@ -476,6 +475,20 @@ function Get-RelaunchArgumentList {
         }
     }
     return $list
+}
+
+function ConvertTo-ControlIds {
+    param([string[]]$Ids)
+    $normalized = @()
+    foreach ($entry in (ConvertTo-Array $Ids)) {
+        foreach ($part in ($entry -split ',')) {
+            $controlId = $part.Trim().ToLowerInvariant()
+            if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $controlId) }
+            if ($normalized -notcontains $controlId) { $normalized += $controlId }
+        }
+    }
+    if ($normalized.Count -eq 0) { throw 'Specify at least one control with -Enable.' }
+    return $normalized
 }
 
 function Request-Elevation {
@@ -527,15 +540,16 @@ function Get-SelfIntegrity {
         endings normalized. Detects accidental corruption in transit. It is NOT a security
         boundary: anyone who can edit the script can recompute the value.
     #>
-    $result = [pscustomobject]@{ Status = 'Unknown'; Expected = $script:ExpectedIntegrityHash; Actual = $null; Path = $null }
+    $expected = Get-Variable -Name ExpectedIntegrityHash -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $result = [pscustomobject]@{ Status = 'Unknown'; Expected = $expected; Actual = $null; Path = $null }
     try {
         $path = $PSCommandPath
-        if ([string]::IsNullOrWhiteSpace($path)) { $result.Status = 'Skipped'; return $result }
+        if ([string]::IsNullOrWhiteSpace($path)) { $result.Status = 'Error'; return $result }
         $result.Path = $path
 
         $text = [IO.File]::ReadAllText($path)
         $pattern = '(?m)^\$script:ExpectedIntegrityHash\s*=\s*''[0-9A-Fa-f]{64}''\s*$'
-        if (-not [regex]::IsMatch($text, $pattern)) { $result.Status = 'Skipped'; return $result }
+        if ([regex]::Matches($text, $pattern).Count -ne 1 -or $expected -notmatch '^[0-9A-Fa-f]{64}$') { $result.Status = 'Failed'; return $result }
 
         $normalized = [regex]::Replace($text, $pattern, ("`$script:ExpectedIntegrityHash = '{0}'" -f ('0' * 64)), 1)
         $normalized = ($normalized -replace "`r`n", "`n") -replace "`r", "`n"
@@ -547,8 +561,8 @@ function Get-SelfIntegrity {
         }
         finally { $sha.Dispose() }
 
-        if ($script:ExpectedIntegrityHash -eq ('0' * 64)) { $result.Status = 'Unsigned' }
-        elseif ($result.Actual -eq $script:ExpectedIntegrityHash.ToLowerInvariant()) { $result.Status = 'OK' }
+        if ($expected -eq ('0' * 64)) { $result.Status = 'Unsigned' }
+        elseif ($result.Actual -eq $expected.ToLowerInvariant()) { $result.Status = 'OK' }
         else { $result.Status = 'Failed' }
     }
     catch {
@@ -4065,7 +4079,10 @@ function Invoke-Main {
         Write-Line 'Use one change mode at a time; -RunId requires -Revert and -Explain cannot be combined with changes.' 'Bad'
         $script:ExitCode = 1; return
     }
-    if ($Enable) { $Enable = @($Enable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    if ($Enable) {
+        $Enable = @(ConvertTo-ControlIds -Ids $Enable)
+        $script:InvocationParameters['Enable'] = $Enable
+    }
     foreach ($controlId in (ConvertTo-Array $Enable)) {
         if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
         if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
@@ -4092,8 +4109,8 @@ function Invoke-Main {
     }
 
     $integrity = Get-SelfIntegrity
-    if ($integrity.Status -eq 'Failed') {
-        Write-Line 'Self-integrity check FAILED: this file does not match its recorded hash.' 'Bad'
+    if ($integrity.Status -ne 'OK') {
+        Write-Line ('Self-integrity could not be verified ({0}).' -f $integrity.Status) 'Bad'
         Write-Line 'Auditing will continue, but making changes is disabled. Download a fresh copy.' 'Warn'
         $script:RemediationAllowed = $false
         $script:ExitCode = 3
@@ -4111,7 +4128,7 @@ function Invoke-Main {
             $script:ExitCode = 1; return
         }
         Show-Explanation (Get-ControlExplanation -Id $id -State $State)
-        $script:ExitCode = 0; return
+        return
     }
 
     $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Revert -or $Rmm)
