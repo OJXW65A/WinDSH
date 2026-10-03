@@ -100,7 +100,7 @@ a{color:inherit}
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
 
     $null = $sb.AppendLine('<div class="card hero">')
-    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Security score">')
+    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Applicable protection score">')
     $null = $sb.AppendLine('<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>')
     $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filled, $gap))
     $null = $sb.AppendLine(('<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">{0}</text>' -f $Score.Score))
@@ -109,9 +109,11 @@ a{color:inherit}
     $null = $sb.AppendLine(('<div class="gl">{0}</div></div>' -f (ConvertTo-HtmlText $Score.Grade)))
 
     $null = $sb.AppendLine('<div class="hero-txt">')
+    $null = $sb.AppendLine('<h2>Applicable protection score</h2>')
+    $null = $sb.AppendLine(('<p class="tiny">{0} of {1} scored controls are applicable; unsupported controls are excluded.</p>' -f $Score.ApplicableCount, $Score.TotalCount))
     $null = $sb.AppendLine(('<p class="verdict">{0} of {1} applicable protections are active on this computer.</p>' -f $running, $countable))
     if ($Score.ExcludedCount -gt 0) {
-        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because this hardware cannot run them. They are not counted against you.</p>' -f $Score.ExcludedCount))
+        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because current platform requirements are not met. They are not counted against you.</p>' -f $Score.ExcludedCount))
     }
     $scVerdict = if ($SecuredCore.Qualifies) { 'This computer meets the Secured-core PC criteria.' } else { ('This computer does not meet the Secured-core PC criteria ({0} requirement(s) unmet).' -f $SecuredCore.UnmetCount) }
     $null = $sb.AppendLine(('<p class="tiny">{0}</p>' -f (ConvertTo-HtmlText $scVerdict)))

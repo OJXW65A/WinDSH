@@ -113,6 +113,10 @@ param(
     [switch]$Version
 )
 
+# Preserve script-level bound arguments; Invoke-Main has no bound parameters.
+$script:InvocationParameters = @{}
+foreach ($parameterName in $PSBoundParameters.Keys) { $script:InvocationParameters[$parameterName] = $PSBoundParameters[$parameterName] }
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
@@ -407,30 +411,42 @@ function Get-ExitCodeMeaning {
     }
 }
 
-function Get-RelaunchArgumentList {
-    <#
-        Rebuilds the invocation from bound parameters instead of concatenating a raw
-        command line. v1's launcher forwarded %* unfiltered into the elevated process,
-        which let a caller steer parameters of a process running with higher privilege.
-        Each value is quoted and internal quotes doubled, so a value can never become
-        a new argument.
-    #>
-    param([hashtable]$Bound)
+function ConvertTo-NativeArgument {
+    <# Quote one argv element using Windows CRT rules used by Start-Process. #>
+    param([AllowEmptyString()][string]$Value)
+    $escaped = [regex]::Replace($Value, '(\\*)"', {
+        param($match)
+        return (('\' * ($match.Groups[1].Value.Length * 2 + 1)) + '"')
+    })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return ('"{0}"' -f $escaped)
+}
 
-    # NOT named $args: that is an automatic variable in PowerShell.
+function Get-RelaunchArgumentList {
+    <# Serialize validated script parameters as argv, never PowerShell expressions. #>
+    param([hashtable]$Bound)
     $list = @()
     foreach ($key in $Bound.Keys) {
+        if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
         if ($value -is [switch]) {
+            # Windows PowerShell 5.1 -File cannot bind explicit switch booleans.
+            # False switches keep their default by omission in a fresh child.
             if ($value.IsPresent) { $list += ('-{0}' -f $key) }
         }
         elseif ($value -is [array]) {
-            $list += ('-{0}' -f $key)
-            foreach ($v in $value) { $list += ('"{0}"' -f ([string]$v -replace '"', '""')) }
+            # powershell.exe -File does not bind several native argv elements to an
+            # array parameter. Enable uses one comma-separated string on relaunch.
+            if ($key -ne 'Enable') { throw 'Only the Enable parameter accepts an array.' }
+            foreach ($controlId in $value) {
+                if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control {0}.' -f $controlId) }
+            }
+            $list += '-Enable'
+            $list += ConvertTo-NativeArgument -Value ($value -join ',')
         }
         elseif ($null -ne $value) {
             $list += ('-{0}' -f $key)
-            $list += ('"{0}"' -f ([string]$value -replace '"', '""'))
+            $list += ConvertTo-NativeArgument -Value ([string]$value)
         }
     }
     return $list
@@ -464,7 +480,7 @@ function Request-Elevation {
 
     # Process-scope Bypass only. This affects this one child process and ends with it;
     # it does not change any persistent execution policy.
-    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-NativeArgument -Value $PSCommandPath))
     $list += Get-RelaunchArgumentList -Bound $Bound
 
     try {

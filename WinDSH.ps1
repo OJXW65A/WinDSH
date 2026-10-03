@@ -113,6 +113,10 @@ param(
     [switch]$Version
 )
 
+# Preserve script-level bound arguments; Invoke-Main has no bound parameters.
+$script:InvocationParameters = @{}
+foreach ($parameterName in $PSBoundParameters.Keys) { $script:InvocationParameters[$parameterName] = $PSBoundParameters[$parameterName] }
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
@@ -122,7 +126,7 @@ $script:SchemaVersion   = '2.0'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = '64796b0edb40ef8f996cd8ed6a1f0cf580c54abcff2850faf46c237ed2c5733d'
+$script:ExpectedIntegrityHash = 'cfba1472f5e1cf27b9a19ad17ceee8cbb99de17df7c94dced2d04466e2d36102'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -406,30 +410,42 @@ function Get-ExitCodeMeaning {
     }
 }
 
-function Get-RelaunchArgumentList {
-    <#
-        Rebuilds the invocation from bound parameters instead of concatenating a raw
-        command line. v1's launcher forwarded %* unfiltered into the elevated process,
-        which let a caller steer parameters of a process running with higher privilege.
-        Each value is quoted and internal quotes doubled, so a value can never become
-        a new argument.
-    #>
-    param([hashtable]$Bound)
+function ConvertTo-NativeArgument {
+    <# Quote one argv element using Windows CRT rules used by Start-Process. #>
+    param([AllowEmptyString()][string]$Value)
+    $escaped = [regex]::Replace($Value, '(\\*)"', {
+        param($match)
+        return (('\' * ($match.Groups[1].Value.Length * 2 + 1)) + '"')
+    })
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return ('"{0}"' -f $escaped)
+}
 
-    # NOT named $args: that is an automatic variable in PowerShell.
+function Get-RelaunchArgumentList {
+    <# Serialize validated script parameters as argv, never PowerShell expressions. #>
+    param([hashtable]$Bound)
     $list = @()
     foreach ($key in $Bound.Keys) {
+        if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
         if ($value -is [switch]) {
+            # Windows PowerShell 5.1 -File cannot bind explicit switch booleans.
+            # False switches keep their default by omission in a fresh child.
             if ($value.IsPresent) { $list += ('-{0}' -f $key) }
         }
         elseif ($value -is [array]) {
-            $list += ('-{0}' -f $key)
-            foreach ($v in $value) { $list += ('"{0}"' -f ([string]$v -replace '"', '""')) }
+            # powershell.exe -File does not bind several native argv elements to an
+            # array parameter. Enable uses one comma-separated string on relaunch.
+            if ($key -ne 'Enable') { throw 'Only the Enable parameter accepts an array.' }
+            foreach ($controlId in $value) {
+                if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control {0}.' -f $controlId) }
+            }
+            $list += '-Enable'
+            $list += ConvertTo-NativeArgument -Value ($value -join ',')
         }
         elseif ($null -ne $value) {
             $list += ('-{0}' -f $key)
-            $list += ('"{0}"' -f ([string]$value -replace '"', '""'))
+            $list += ConvertTo-NativeArgument -Value ([string]$value)
         }
     }
     return $list
@@ -463,7 +479,7 @@ function Request-Elevation {
 
     # Process-scope Bypass only. This affects this one child process and ends with it;
     # it does not change any persistent execution policy.
-    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    $list = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (ConvertTo-NativeArgument -Value $PSCommandPath))
     $list += Get-RelaunchArgumentList -Bound $Bound
 
     try {
@@ -542,6 +558,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'vbs'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Virtualization-based Security'
         PlainName   = 'Core security container'
         Category    = 'Platform'
@@ -572,6 +589,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'platform-security'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Platform Security Level'
         PlainName   = 'Secure Boot requirement'
         Category    = 'Platform'
@@ -605,6 +623,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvci'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Memory Integrity (HVCI)'
         PlainName   = 'Driver protection'
         Category    = 'Kernel'
@@ -648,6 +667,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvci-mat'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Require UEFI Memory Attributes Table'
         PlainName   = 'Firmware compatibility check'
         Category    = 'Kernel'
@@ -676,6 +696,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'credential-guard'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization', 'CredentialGuardEdition')
         Name        = 'Credential Guard'
         PlainName   = 'Password and sign-in protection'
         Category    = 'Credentials'
@@ -707,6 +728,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'secure-launch'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization', 'Tpm2')
         Name        = 'System Guard Secure Launch'
         PlainName   = 'Firmware attack protection'
         Category    = 'Firmware'
@@ -735,6 +757,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'kernel-shadow-stacks'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Kernel-mode Hardware-enforced Stack Protection'
         PlainName   = 'Code hijacking protection'
         Category    = 'Kernel'
@@ -768,6 +791,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvpt'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Hypervisor-enforced Paging Translation'
         PlainName   = 'Memory address protection'
         Category    = 'Kernel'
@@ -788,6 +812,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'smm-firmware-measurement'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'SMM Firmware Measurement'
         PlainName   = 'Firmware self-check'
         Category    = 'Firmware'
@@ -808,6 +833,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'dep'
+        PlatformRequirements = @()
         Name        = 'Data Execution Prevention'
         PlainName   = 'Executable memory protection'
         Category    = 'Kernel'
@@ -828,6 +854,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'driver-blocklist'
+        PlatformRequirements = @('64Bit')
         Name        = 'Microsoft vulnerable driver blocklist'
         PlainName   = 'Known-bad driver blocking'
         Category    = 'Kernel'
@@ -1478,61 +1505,44 @@ function Get-ControlSupport {
     #>
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
 
-    if (-not $State.Computer.Is64Bit) {
-        return [pscustomobject]@{ Supported = $false; Reason = 'These protections require a 64-bit version of Windows.'; Fix = $null }
+    $requirements = @(ConvertTo-Array $Control.PlatformRequirements)
+    foreach ($requirement in $requirements) {
+        switch ($requirement) {
+            '64Bit' {
+                if (-not $State.Computer.Is64Bit) { return [pscustomobject]@{ Supported = $false; Reason = 'This protection requires a 64-bit version of Windows.'; Fix = $null } }
+            }
+            'Hypervisor' {
+                if ($State.HypervisorLaunch.BlocksVbs) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'The Windows hypervisor is switched off in the boot configuration, so this protection cannot start.'; Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.' }
+                }
+            }
+            'Uefi' {
+                if (-not $State.Firmware.IsUefiConfirmed) {
+                    return [pscustomobject]@{ Supported = $false; Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode); Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.' }
+                }
+            }
+            'Virtualization' {
+                if (-not $State.Virtualization.FirmwareEnabled) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'CPU virtualization is turned off in firmware.'; Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.' }
+                }
+            }
+            'Tpm2' {
+                if (-not $State.Tpm.IsTPM2) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'TPM 2.0 was not confirmed, and this protection needs it to store boot measurements.'; Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.' }
+                }
+            }
+            'CredentialGuardEdition' {
+                $edition = [string]$State.Computer.EditionId
+                if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
+                    return [pscustomobject]@{ Supported = $false; Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition); Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.' }
+                }
+            }
+            default { throw ('Unknown platform requirement {0} in control {1}.' -f $requirement, $Control.Id) }
+        }
     }
     $minBuild = Get-PropertySafe $Control 'MinimumBuild' $null
     if ($null -ne $minBuild -and $State.Computer.BuildNumber -gt 0 -and $State.Computer.BuildNumber -lt [int]$minBuild) {
-        return [pscustomobject]@{
-            Supported = $false
-            Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber)
-            Fix = 'Update Windows to a newer feature release.'
-        }
-    }
-
-    if ($Control.Category -ne 'Kernel' -or $Control.Id -ne 'driver-blocklist') {
-        if ($Control.Id -ne 'driver-blocklist') {
-            if ($State.HypervisorLaunch.BlocksVbs) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = 'The Windows hypervisor is switched off in the boot configuration, so no protection of this kind can start.'
-                    Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.'
-                }
-            }
-            if (-not $State.Firmware.IsUefiConfirmed) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode)
-                    Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.'
-                }
-            }
-            if (-not $State.Virtualization.FirmwareEnabled) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = 'CPU virtualization is turned off in firmware.'
-                    Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.'
-                }
-            }
-        }
-    }
-
-    if ($Control.Id -eq 'secure-launch' -and -not $State.Tpm.IsTPM2) {
-        return [pscustomobject]@{
-            Supported = $false
-            Reason = 'TPM 2.0 was not confirmed, and Secure Launch needs it to store boot measurements.'
-            Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.'
-        }
-    }
-
-    if ($Control.Id -eq 'credential-guard') {
-        $edition = [string]$State.Computer.EditionId
-        if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
-            return [pscustomobject]@{
-                Supported = $false
-                Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition)
-                Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.'
-            }
-        }
+        return [pscustomobject]@{ Supported = $false; Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber); Fix = 'Update Windows to a newer feature release.' }
     }
 
     return [pscustomobject]@{ Supported = $true; Reason = $null; Fix = $null }
@@ -1673,6 +1683,8 @@ function Get-SecurityScore {
         Possible = [math]::Round($possible, 1)
         ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
         Breakdown = $breakdown
+        ApplicableCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.Supported }).Count
+        TotalCount = @($Statuses | Where-Object { $_.Weight -gt 0 }).Count
     }
 }
 
@@ -1759,10 +1771,10 @@ function Get-CisComplianceReport {
 # ---------------------------------------------------------------------------
 
 function Get-ControlExplanation {
-    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State)
+    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State, $Status)
 
     $control = Get-Control -Id $Id
-    $status = Get-ControlStatus -Id $Id -State $State
+    $status = if ($Status) { $Status } else { Get-ControlStatus -Id $Id -State $State }
 
     $verdict = $null; $action = $null; $severity = 'Info'
 
@@ -1811,7 +1823,8 @@ function Get-ControlExplanation {
         if ($preflight -and $preflight.Tripped) {
             $verdict = ('{0} is not configured, and enabling it right now looks risky.' -f $control.Name)
             $lines = @($preflight.Message, '')
-            $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount)
+            if ($preflight.Queried) { $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount) }
+            elseif ($preflight.Error) { $lines += ('  Log query failed: {0}' -f $preflight.Error) }
             foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
                 $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
                 $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
@@ -1819,7 +1832,7 @@ function Get-ControlExplanation {
                 $lines += ('  - {0} ({1}, {2}){3}' -f $d.FileName, $who, $ver, $svc)
             }
             $lines += ''
-            $lines += '  Update or remove the driver above, restart, then run the audit again.'
+            $lines += $(if ($preflight.Queried) { '  Update or remove the driver above, restart, then run the audit again.' } else { '  Restore access to the Code Integrity log, then run the audit again. Automatic remediation will skip this protection.' })
             $action = ($lines -join "`n")
             $severity = 'Warn'
         }
@@ -1888,6 +1901,19 @@ function Get-HardwareCapabilityAdvice {
         default {
             return 'Everything Windows can verify is in order. The remaining explanation is that this hardware or firmware does not provide the capability.'
         }
+    }
+}
+
+function Get-Assessment {
+    param([Parameter(Mandatory = $true)]$State)
+    $statuses = @(Get-AllControlStatus -State $State)
+    return [pscustomobject]@{
+        State = $State
+        Statuses = $statuses
+        Score = Get-SecurityScore -Statuses $statuses
+        SecuredCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
+        Cis = Get-CisComplianceReport -State $State -Statuses $statuses
+        Explanations = @($statuses | ForEach-Object { Get-ControlExplanation -Id $_.Id -State $State -Status $_ })
     }
 }
 
@@ -2702,11 +2728,12 @@ function New-TextReport {
 
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
-    $lines += 'SECURITY SCORE'
+    $lines += 'APPLICABLE PROTECTION SCORE'
     $lines += ('  {0} / 100 ({1})' -f $Score.Score, $Score.Grade)
+    $lines += ('  {0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount)
     $lines += ('  {0} of {1} applicable protections are active.' -f $running, $countable)
     if ($Score.ExcludedCount -gt 0) {
-        $lines += ('  {0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount)
+        $lines += ('  {0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount)
     }
     $lines += ('  Secured-core PC: {0}' -f $(if ($SecuredCore.Qualifies) { 'qualifies' } else { ('does not qualify, {0} requirement(s) unmet' -f $SecuredCore.UnmetCount) }))
     $lines += ''
@@ -2907,7 +2934,7 @@ a{color:inherit}
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
 
     $null = $sb.AppendLine('<div class="card hero">')
-    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Security score">')
+    $null = $sb.AppendLine('<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Applicable protection score">')
     $null = $sb.AppendLine('<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>')
     $null = $sb.AppendLine(('<circle cx="90" cy="90" r="70" fill="none" stroke="{0}" stroke-width="16" stroke-linecap="round" stroke-dasharray="{1} {2}" transform="rotate(-90 90 90)"/>' -f $scoreColour, $filled, $gap))
     $null = $sb.AppendLine(('<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">{0}</text>' -f $Score.Score))
@@ -2916,9 +2943,11 @@ a{color:inherit}
     $null = $sb.AppendLine(('<div class="gl">{0}</div></div>' -f (ConvertTo-HtmlText $Score.Grade)))
 
     $null = $sb.AppendLine('<div class="hero-txt">')
+    $null = $sb.AppendLine('<h2>Applicable protection score</h2>')
+    $null = $sb.AppendLine(('<p class="tiny">{0} of {1} scored controls are applicable; unsupported controls are excluded.</p>' -f $Score.ApplicableCount, $Score.TotalCount))
     $null = $sb.AppendLine(('<p class="verdict">{0} of {1} applicable protections are active on this computer.</p>' -f $running, $countable))
     if ($Score.ExcludedCount -gt 0) {
-        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because this hardware cannot run them. They are not counted against you.</p>' -f $Score.ExcludedCount))
+        $null = $sb.AppendLine(('<p class="tiny">{0} protection(s) are excluded from the score because current platform requirements are not met. They are not counted against you.</p>' -f $Score.ExcludedCount))
     }
     $scVerdict = if ($SecuredCore.Qualifies) { 'This computer meets the Secured-core PC criteria.' } else { ('This computer does not meet the Secured-core PC criteria ({0} requirement(s) unmet).' -f $SecuredCore.UnmetCount) }
     $null = $sb.AppendLine(('<p class="tiny">{0}</p>' -f (ConvertTo-HtmlText $scVerdict)))
@@ -3302,6 +3331,29 @@ function Invoke-SelfTest {
     $depOff = New-SyntheticState
     $depOff.Dep = [pscustomobject]@{ SupportPolicy = 0; Available = $true; Text = 'Always off'; Enabled = $false }
     Assert-That 'DEP off is not reported as configured' ((Get-ControlStatus -Id 'dep' -State $depOff).State -ne 'Running')
+    $depLegacy = New-SyntheticState
+    $depLegacy.Firmware.IsUefiConfirmed = $false
+    $depLegacy.Virtualization.FirmwareEnabled = $false
+    $depLegacy.HypervisorLaunch.BlocksVbs = $true
+    $depLegacy.Computer.Is64Bit = $false
+    Assert-That 'DEP does not inherit VBS platform prerequisites' ((Get-ControlStatus -Id 'dep' -State $depLegacy).State -eq 'Running')
+
+    Set-RegistryProvider (New-InMemoryRegistryProvider)
+    $assessmentBefore = Get-Assessment -State $clean
+    & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+    $assessmentAfter = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh recalculates statuses and score together' ($assessmentAfter.Score.Score -gt $assessmentBefore.Score.Score -and @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' -and $_.Running }).Count -eq 1)
+    $freshExplain = @($assessmentAfter.Explanations | Where-Object { $_.Id -eq 'driver-blocklist' })[0]
+    Assert-That 'Assessment explanations use the same refreshed status snapshot' ($freshExplain.Status -eq @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' })[0])
+    $clean.DeviceGuard.Running = @(2, 3)
+    $clean.DeviceGuard.VbsStatusCode = 2
+    $clean.DeviceGuard.HasSmmMitigations = $true
+    $coreAssessment = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh updates Secured-core and CIS derived state' ($coreAssessment.SecuredCore.Qualifies -and @($coreAssessment.Cis.Rows | Where-Object { $_.ControlId -eq 'hvci' -and $_.FeatureRunning }).Count -eq 1)
+    $clean.DeviceGuard.Running = @()
+    $clean.DeviceGuard.VbsStatusCode = 0
+    $clean.DeviceGuard.HasSmmMitigations = $false
+    & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
 
     $hvptState = New-SyntheticState
     $hvptState.DeviceGuard.Running = @(7)
@@ -3394,10 +3446,14 @@ function Invoke-SelfTest {
 
     $hostile = Get-RelaunchArgumentList -Bound @{ ReportDirectory = 'C:\x" -Enable credential-guard "' }
     Assert-That 'Embedded quotes cannot inject a new argument' (-not ($hostile -contains '-Enable')) ($hostile -join ' ')
-    Assert-That 'Embedded quotes are doubled, not passed through' (@($hostile | Where-Object { $_ -match '""' }).Count -eq 1) ($hostile -join ' ')
+    Assert-That 'Embedded quotes use native argument escaping' (@($hostile | Where-Object { $_.Contains('\"') }).Count -eq 1) ($hostile -join ' ')
 
     $empty = Get-RelaunchArgumentList -Bound @{ AutoReboot = [switch]$false }
     Assert-That 'An unset switch is not relaunched' (@($empty).Count -eq 0) ('count={0}' -f @($empty).Count)
+    $trailing = ConvertTo-NativeArgument 'C:\Reports\'
+    Assert-That 'Trailing path backslashes cannot consume the closing argument quote' ($trailing -eq '"C:\Reports\\"')
+    $arrayRelaunch = Get-RelaunchArgumentList -Bound @{ Enable = @('hvci', 'driver-blocklist') }
+    Assert-That 'Multiple Enable controls survive native File argument binding' ($arrayRelaunch -contains '"hvci,driver-blocklist"')
 
     # --- CIS comparison ---
     $cisState = New-SyntheticState
@@ -3438,7 +3494,7 @@ function Invoke-SelfTest {
     $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
     Assert-That 'Plain-text report is produced' ($textReport.Length -gt 1500) ('{0} bytes' -f $textReport.Length)
     Assert-That 'Text report states the CIS hive caveat' ($textReport -match 'Group Policy hive')
-    Assert-That 'Text report includes the score' ($textReport -match 'SECURITY SCORE')
+    Assert-That 'Text report includes the score' ($textReport -match 'APPLICABLE PROTECTION SCORE')
     Assert-That 'Text report includes DEP' ($textReport -match 'DEP')
 
     Set-RegistryProvider (New-RegistryProvider)
@@ -3459,14 +3515,15 @@ function Invoke-SelfTest {
 function Show-Summary {
     param($State, $Statuses, $Score, $SecuredCore)
 
-    Write-Section 'Security score'
+    Write-Section 'Applicable protection score'
     $kind = if ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
+    Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
     if ($Score.ExcludedCount -gt 0) {
-        Write-Line ('{0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
+        Write-Line ('{0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount) 'Dim'
     }
 
     if ($State.HypervisorLaunch.BlocksVbs) {
@@ -3662,7 +3719,7 @@ function Wait-ForKey {
 function Show-Menu {
     param($Statuses, $Score)
     Write-Host ''
-    Write-Line ('{0} {1}   security score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
+    Write-Line ('{0} {1}   applicable protection score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
     Write-Host ''
     Write-Line '  [1] Re-check this computer' 'Plain'
     Write-Line '  [2] Fix what can be fixed safely' 'Plain'
@@ -3738,28 +3795,25 @@ function Show-Explanation {
 function Invoke-Interactive {
     param($State)
 
-    $statuses = Get-AllControlStatus -State $State
-    $score = Get-SecurityScore -Statuses $statuses
-    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
+    $assessment = Get-Assessment -State $State
 
-    Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-    Show-NextSteps -Explanations $explanations
+    Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+    Show-NextSteps -Explanations $assessment.Explanations
 
+    $changed = $false
     while ($true) {
-        Show-Menu -Statuses $statuses -Score $score
+        Show-Menu -Statuses $assessment.Statuses -Score $assessment.Score
         $choice = Read-Choice '12345Q'
 
         if ($choice -eq 'Q') {
             # No second full audit when nothing changed: the state we have is still true.
-            if (@($script:AppliedChanges).Count -eq 0) {
+            if (-not $changed) {
                 Write-Line ''
                 Write-Line 'No changes were made to this computer.' 'Dim'
                 if ($State.Restart.Pending) { Write-Line 'Note: Windows has its own restart pending, unrelated to this tool.' 'Dim' }
                 return
             }
-            $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+            $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
             foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
             if ($script:RestartRequired) {
                 Write-Line ''
@@ -3771,16 +3825,13 @@ function Invoke-Interactive {
         switch ($choice) {
             '1' {
                 $State = Get-SystemState -Volatile
-                $statuses = Get-AllControlStatus -State $State
-                $score = Get-SecurityScore -Statuses $statuses
-                $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-                $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-                $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
-                Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-                Show-NextSteps -Explanations $explanations
+                $assessment = Get-Assessment -State $State
+                Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+                Show-NextSteps -Explanations $assessment.Explanations
             }
             '2' {
                 $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $State
+                if ($result.ChangeCount -gt 0) { $changed = $true }
                 Write-Section 'Result'
                 if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                 foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
@@ -3790,8 +3841,7 @@ function Invoke-Interactive {
                     Write-Line ('Restart required. Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info'
                 }
                 $State = Get-SystemState -Volatile
-                $statuses = Get-AllControlStatus -State $State
-                $score = Get-SecurityScore -Statuses $statuses
+                $assessment = Get-Assessment -State $State
             }
             '3' {
                 $id = Select-ControlInteractive
@@ -3808,7 +3858,7 @@ function Invoke-Interactive {
                 $script:HtmlSelected = [bool]($fmt -eq '1' -or $fmt -eq '4')
                 $script:TextSelected = [bool]($fmt -eq '2' -or $fmt -eq '4')
                 $script:JsonSelected = [bool]($fmt -eq '3' -or $fmt -eq '4')
-                $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
+                $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
                 foreach ($p in $paths) { Write-Line ('Saved: {0}' -f $p) 'Good' }
             }
             '5' {
@@ -3820,13 +3870,13 @@ function Invoke-Interactive {
                         $id = Select-ControlInteractive
                         if ($id) {
                             $result = Invoke-ControlApply -Ids @($id) -State $State -ExplicitIds @($id)
+                            if ($result.ChangeCount -gt 0) { $changed = $true }
                             Write-Section 'Result'
                             if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
                             foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
                             foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
                             $State = Get-SystemState -Volatile
-                            $statuses = Get-AllControlStatus -State $State
-                            $score = Get-SecurityScore -Statuses $statuses
+                            $assessment = Get-Assessment -State $State
                         }
                     }
                     'C' {
@@ -3838,14 +3888,15 @@ function Invoke-Interactive {
                             $rid = Read-Host 'Run id to undo (blank to cancel)'
                             if (-not [string]::IsNullOrWhiteSpace($rid)) {
                                 $rev = Invoke-ControlRevert -RunId $rid.Trim()
+                                if ($rev.ChangeCount -gt 0) { $changed = $true }
+                                foreach ($conflict in $rev.Conflicts) { Write-Line $conflict.Reason 'Warn'; Add-Warning $conflict.Reason }
                                 Write-Line ('Reverted {0} change(s).' -f $rev.ChangeCount) 'Good'
                                 $State = Get-SystemState -Volatile
-                                $statuses = Get-AllControlStatus -State $State
-                                $score = Get-SecurityScore -Statuses $statuses
+                                $assessment = Get-Assessment -State $State
                             }
                         }
                     }
-                    'D' { Show-CisSummary -Cis $cis }
+                    'D' { Show-CisSummary -Cis $assessment.Cis }
                     'E' {
                         try { Start-Process 'windowsdefender://coreisolation' | Out-Null; Write-Line 'Opened Windows Security.' 'Good' }
                         catch { Write-Line 'Could not open Windows Security.' 'Warn' }
@@ -3894,6 +3945,20 @@ function Invoke-Main {
         $script:ExitCode = 1; return
     }
 
+    if (($EnableAllSafe -and $Enable) -or ($Revert -and ($EnableAllSafe -or $Enable)) -or ($Explain -and ($EnableAllSafe -or $Enable -or $Revert)) -or ($RunId -and -not $Revert)) {
+        Write-Line 'Use one change mode at a time; -RunId requires -Revert and -Explain cannot be combined with changes.' 'Bad'
+        $script:ExitCode = 1; return
+    }
+    if ($Enable) { $Enable = @($Enable | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() }) }
+    foreach ($controlId in (ConvertTo-Array $Enable)) {
+        if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+        if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+    }
+    if ($Explain -and -not (Test-Contains (Get-ControlIds) $Explain.Trim().ToLowerInvariant())) {
+        Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
+        $script:ExitCode = 1; return
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($DebugLogPath)) {
         $script:DebugEnabled = $true
         $script:DebugPath = $DebugLogPath
@@ -3903,7 +3968,7 @@ function Invoke-Main {
     if (-not (Test-IsElevated)) {
         # Try to elevate ourselves first. Telling a non-technical user to "run as
         # administrator" and exiting is not a workable instruction for this audience.
-        if (Request-Elevation -Bound $PSBoundParameters) { return }
+        if (Request-Elevation -Bound $script:InvocationParameters) { return }
         Write-Line 'WinDSH needs to run as Administrator to read platform security state.' 'Bad'
         Write-Line 'Right-click PowerShell, choose "Run as administrator", then run it again.' 'Info'
         Write-Line 'Or use Run-WinDSH-AsAdmin.bat, which requests elevation for you.' 'Info'
@@ -3933,86 +3998,98 @@ function Invoke-Main {
         $script:ExitCode = 0; return
     }
 
+    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Revert -or $Rmm)
+    $script:Unattended = $unattended
     if ($Revert) {
         if (-not $script:RemediationAllowed) { Write-Line 'Revert is disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
         try {
             $result = Invoke-ControlRevert -RunId $RunId
             Write-Section 'Revert'
             foreach ($r in $result.Reverted) { Write-Line ('{0}\{1} restored to {2}' -f $r.Path, $r.Name, $r.RestoredTo) 'Good' 2 }
-            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Good'
-            $script:ExitCode = $(if ($result.RestartRequired) { 3010 } else { 0 }); return
+            foreach ($conflict in $result.Conflicts) {
+                $message = '{0}\{1}: {2}' -f $conflict.Path, $conflict.Name, $conflict.Reason
+                Write-Line $message 'Warn'; Add-Warning $message
+            }
+            if ($result.Conflicts.Count -gt 0) { $script:ExitCode = 5 }
+            Write-Line ('Reverted {0} change(s) from run {1}.' -f $result.ChangeCount, $result.RunId) 'Info'
         }
         catch {
-            Write-Line ('Revert failed: {0}' -f $_.Exception.Message) 'Bad'
-            $script:ExitCode = 5; return
+            Add-Warning ('Revert failed: {0}' -f $_.Exception.Message)
+            $script:ExitCode = 5
         }
+        $State = Get-SystemState -Volatile
     }
-
-    $unattended = [bool]($AuditOnly -or $EnableAllSafe -or $Enable -or $Rmm)
-    # Confirm-Action reads this: prompts are interactive-only, because a prompt on an
-    # unattended run would hang waiting for a user who is not there.
-    $script:Unattended = $unattended
-
-    if ($EnableAllSafe -or $Enable) {
+    elseif ($EnableAllSafe -or $Enable) {
         if (-not $script:RemediationAllowed) { Write-Line 'Changes are disabled because the integrity check failed.' 'Bad'; $script:ExitCode = 3; return }
         $ids = if ($Enable) { @($Enable) } else { $script:SafeControlSet }
-        foreach ($id in $ids) {
-            if (-not (Test-Contains (Get-ControlIds) $id)) { Write-Line ('Unknown control "{0}".' -f $id) 'Bad'; $script:ExitCode = 1; return }
-        }
-
         if ($WhatIfPreference) { Show-Plan (Get-ChangePlan -Ids $ids -State $State -ExplicitIds @($Enable)) }
         else {
-            $result = Invoke-ControlApply -Ids $ids -State $State -ExplicitIds @($Enable)
-            Write-Section 'Changes'
-            if ($result.ChangeCount -eq 0) { Write-Line 'Nothing needed changing.' 'Good' }
-            foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
-            foreach ($s in $result.Skipped) { Write-Line ('Skipped {0}: {1}' -f $s.ControlName, $s.Reason) 'Warn' 2 }
-            if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            try {
+                $result = Invoke-ControlApply -Ids $ids -State $State -ExplicitIds @($Enable)
+                Write-Section 'Changes'
+                if ($result.ChangeCount -eq 0 -and $result.Skipped.Count -eq 0) { Write-Line 'No changes were needed.' 'Good' }
+                elseif ($result.ChangeCount -eq 0) { Write-Line 'No changes were made; see the skipped protections below.' 'Warn' }
+                foreach ($a in $result.Applied) { Write-Line ('{0}: {1} -> {2}' -f $a.ControlName, $a.Before, $a.After) 'Good' 2 }
+                foreach ($skip in $result.Skipped) {
+                    $message = 'Skipped {0}: {1}' -f $skip.ControlName, $skip.Reason
+                    Write-Line $message 'Warn'; Add-Warning $message
+                }
+                if ($result.ChangeCount -gt 0) { Write-Line ('Undo with:  -Revert -RunId {0}' -f $result.RunId) 'Info' }
+            }
+            catch {
+                Add-Warning ('Remediation stopped: {0}' -f $_.Exception.Message)
+                $script:ExitCode = 1
+            }
             $State = Get-SystemState -Volatile
         }
     }
 
-    $statuses = Get-AllControlStatus -State $State
-    $score = Get-SecurityScore -Statuses $statuses
-    $securedCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
-    $cis = Get-CisComplianceReport -State $State -Statuses $statuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $State })
-
+    $assessment = Get-Assessment -State $State
     if ($Rmm) {
-        if ($script:RestartRequired) { $script:ExitCode = 3010 }
-        Write-RmmOutput -State $State -Statuses $statuses -Score $score -Cis $cis
-        $script:ExitCode = $script:ExitCode; return
+        # Automation writes files only when a format was explicitly selected.
+        if ($HtmlReport -or $JsonReport -or $TextReport) {
+            [void](Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
+        }
     }
-
-    if ($unattended) {
-        Show-Summary -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore
-        Show-NextSteps -Explanations $explanations
-        if ($Advanced) { Show-CisSummary -Cis $cis }
-        $paths = Save-Reports -State $State -Statuses $statuses -Score $score -SecuredCore $securedCore -Cis $cis -Explanations $explanations
+    elseif ($unattended) {
+        Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
+        Show-NextSteps -Explanations $assessment.Explanations
+        if ($Advanced) { Show-CisSummary -Cis $assessment.Cis }
+        $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
         foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
     }
-    else {
-        Invoke-Interactive -State $State
-    }
+    else { Invoke-Interactive -State $State }
 
+    $script:ExitCode = Get-FinalExitCode
+    if ($AutoReboot -and $script:ExitCode -eq 3010 -and -not $WhatIfPreference) {
+        try { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force -ErrorAction Stop }
+        catch { Add-Warning ('Automatic restart failed: {0}' -f $_.Exception.Message); $script:ExitCode = 1 }
+    }
+    if ($Rmm) {
+        Write-RmmOutput -State $State -Statuses $assessment.Statuses -Score $assessment.Score -Cis $assessment.Cis
+        return
+    }
     foreach ($w in $script:Warnings) { Write-Line $w 'Warn' }
-
-    if ($unattended -and -not $Rmm) {
-        $final = if ($script:RestartRequired) { 3010 } elseif ($script:ExitCode -ne 0) { $script:ExitCode } elseif (@($script:Warnings).Count -gt 0) { 2 } else { 0 }
+    if ($unattended) {
         Write-Line ''
-        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $final)) 'Dim'
+        Write-Line ('Result: {0}' -f (Get-ExitCodeMeaning -Code $script:ExitCode)) 'Dim'
     }
+}
 
-    if ($script:RestartRequired) {
-        if ($AutoReboot) { Write-Line 'Restarting now.' 'Warn'; Restart-Computer -Force; $script:ExitCode = 3010; return }
-        $script:ExitCode = 3010; return
-    }
-    if ($script:ExitCode -ne 0) { $script:ExitCode = $script:ExitCode; return }
-    if (@($script:Warnings).Count -gt 0) { $script:ExitCode = 2; return }
-    $script:ExitCode = 0; return
+function Get-FinalExitCode {
+    # A partial failure must not be hidden behind a restart-required success code.
+    if ($script:ExitCode -ne 0) { return $script:ExitCode }
+    if ($script:RestartRequired) { return 3010 }
+    if (@($script:Warnings).Count -gt 0) { return 2 }
+    return 0
 }
 
 # Invoke-Main sets $script:ExitCode itself. Its output is NOT captured, so RMM mode
 # can emit its JSON object on stdout for a pipeline to consume.
-Invoke-Main
+try { Invoke-Main }
+catch {
+    $script:ExitCode = 1
+    if ($Rmm) { Write-Output (([pscustomobject]@{ tool = $script:ToolName; exitCode = 1; error = $_.Exception.Message }) | ConvertTo-Json -Compress) }
+    else { Write-Line ('WinDSH failed: {0}' -f $_.Exception.Message) 'Bad' }
+}
 exit $script:ExitCode

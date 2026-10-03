@@ -280,6 +280,29 @@ function Invoke-SelfTest {
     $depOff = New-SyntheticState
     $depOff.Dep = [pscustomobject]@{ SupportPolicy = 0; Available = $true; Text = 'Always off'; Enabled = $false }
     Assert-That 'DEP off is not reported as configured' ((Get-ControlStatus -Id 'dep' -State $depOff).State -ne 'Running')
+    $depLegacy = New-SyntheticState
+    $depLegacy.Firmware.IsUefiConfirmed = $false
+    $depLegacy.Virtualization.FirmwareEnabled = $false
+    $depLegacy.HypervisorLaunch.BlocksVbs = $true
+    $depLegacy.Computer.Is64Bit = $false
+    Assert-That 'DEP does not inherit VBS platform prerequisites' ((Get-ControlStatus -Id 'dep' -State $depLegacy).State -eq 'Running')
+
+    Set-RegistryProvider (New-InMemoryRegistryProvider)
+    $assessmentBefore = Get-Assessment -State $clean
+    & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'DWord' 1
+    $assessmentAfter = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh recalculates statuses and score together' ($assessmentAfter.Score.Score -gt $assessmentBefore.Score.Score -and @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' -and $_.Running }).Count -eq 1)
+    $freshExplain = @($assessmentAfter.Explanations | Where-Object { $_.Id -eq 'driver-blocklist' })[0]
+    Assert-That 'Assessment explanations use the same refreshed status snapshot' ($freshExplain.Status -eq @($assessmentAfter.Statuses | Where-Object { $_.Id -eq 'driver-blocklist' })[0])
+    $clean.DeviceGuard.Running = @(2, 3)
+    $clean.DeviceGuard.VbsStatusCode = 2
+    $clean.DeviceGuard.HasSmmMitigations = $true
+    $coreAssessment = Get-Assessment -State $clean
+    Assert-That 'Assessment refresh updates Secured-core and CIS derived state' ($coreAssessment.SecuredCore.Qualifies -and @($coreAssessment.Cis.Rows | Where-Object { $_.ControlId -eq 'hvci' -and $_.FeatureRunning }).Count -eq 1)
+    $clean.DeviceGuard.Running = @()
+    $clean.DeviceGuard.VbsStatusCode = 0
+    $clean.DeviceGuard.HasSmmMitigations = $false
+    & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
 
     $hvptState = New-SyntheticState
     $hvptState.DeviceGuard.Running = @(7)
@@ -372,10 +395,14 @@ function Invoke-SelfTest {
 
     $hostile = Get-RelaunchArgumentList -Bound @{ ReportDirectory = 'C:\x" -Enable credential-guard "' }
     Assert-That 'Embedded quotes cannot inject a new argument' (-not ($hostile -contains '-Enable')) ($hostile -join ' ')
-    Assert-That 'Embedded quotes are doubled, not passed through' (@($hostile | Where-Object { $_ -match '""' }).Count -eq 1) ($hostile -join ' ')
+    Assert-That 'Embedded quotes use native argument escaping' (@($hostile | Where-Object { $_.Contains('\"') }).Count -eq 1) ($hostile -join ' ')
 
     $empty = Get-RelaunchArgumentList -Bound @{ AutoReboot = [switch]$false }
     Assert-That 'An unset switch is not relaunched' (@($empty).Count -eq 0) ('count={0}' -f @($empty).Count)
+    $trailing = ConvertTo-NativeArgument 'C:\Reports\'
+    Assert-That 'Trailing path backslashes cannot consume the closing argument quote' ($trailing -eq '"C:\Reports\\"')
+    $arrayRelaunch = Get-RelaunchArgumentList -Bound @{ Enable = @('hvci', 'driver-blocklist') }
+    Assert-That 'Multiple Enable controls survive native File argument binding' ($arrayRelaunch -contains '"hvci,driver-blocklist"')
 
     # --- CIS comparison ---
     $cisState = New-SyntheticState
@@ -416,7 +443,7 @@ function Invoke-SelfTest {
     $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
     Assert-That 'Plain-text report is produced' ($textReport.Length -gt 1500) ('{0} bytes' -f $textReport.Length)
     Assert-That 'Text report states the CIS hive caveat' ($textReport -match 'Group Policy hive')
-    Assert-That 'Text report includes the score' ($textReport -match 'SECURITY SCORE')
+    Assert-That 'Text report includes the score' ($textReport -match 'APPLICABLE PROTECTION SCORE')
     Assert-That 'Text report includes DEP' ($textReport -match 'DEP')
 
     Set-RegistryProvider (New-RegistryProvider)

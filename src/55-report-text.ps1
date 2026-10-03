@@ -24,11 +24,12 @@ function New-TextReport {
 
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
-    $lines += 'SECURITY SCORE'
+    $lines += 'APPLICABLE PROTECTION SCORE'
     $lines += ('  {0} / 100 ({1})' -f $Score.Score, $Score.Grade)
+    $lines += ('  {0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount)
     $lines += ('  {0} of {1} applicable protections are active.' -f $running, $countable)
     if ($Score.ExcludedCount -gt 0) {
-        $lines += ('  {0} excluded: this hardware cannot run them, so they are not counted against you.' -f $Score.ExcludedCount)
+        $lines += ('  {0} excluded: current platform requirements are not met, so they are not counted against you.' -f $Score.ExcludedCount)
     }
     $lines += ('  Secured-core PC: {0}' -f $(if ($SecuredCore.Qualifies) { 'qualifies' } else { ('does not qualify, {0} requirement(s) unmet' -f $SecuredCore.UnmetCount) }))
     $lines += ''

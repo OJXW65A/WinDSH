@@ -24,6 +24,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'vbs'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Virtualization-based Security'
         PlainName   = 'Core security container'
         Category    = 'Platform'
@@ -54,6 +55,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'platform-security'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Platform Security Level'
         PlainName   = 'Secure Boot requirement'
         Category    = 'Platform'
@@ -87,6 +89,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvci'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Memory Integrity (HVCI)'
         PlainName   = 'Driver protection'
         Category    = 'Kernel'
@@ -130,6 +133,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvci-mat'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Require UEFI Memory Attributes Table'
         PlainName   = 'Firmware compatibility check'
         Category    = 'Kernel'
@@ -158,6 +162,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'credential-guard'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization', 'CredentialGuardEdition')
         Name        = 'Credential Guard'
         PlainName   = 'Password and sign-in protection'
         Category    = 'Credentials'
@@ -189,6 +194,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'secure-launch'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization', 'Tpm2')
         Name        = 'System Guard Secure Launch'
         PlainName   = 'Firmware attack protection'
         Category    = 'Firmware'
@@ -217,6 +223,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'kernel-shadow-stacks'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Kernel-mode Hardware-enforced Stack Protection'
         PlainName   = 'Code hijacking protection'
         Category    = 'Kernel'
@@ -250,6 +257,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'hvpt'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'Hypervisor-enforced Paging Translation'
         PlainName   = 'Memory address protection'
         Category    = 'Kernel'
@@ -270,6 +278,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'smm-firmware-measurement'
+        PlatformRequirements = @('64Bit', 'Hypervisor', 'Uefi', 'Virtualization')
         Name        = 'SMM Firmware Measurement'
         PlainName   = 'Firmware self-check'
         Category    = 'Firmware'
@@ -290,6 +299,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'dep'
+        PlatformRequirements = @()
         Name        = 'Data Execution Prevention'
         PlainName   = 'Executable memory protection'
         Category    = 'Kernel'
@@ -310,6 +320,7 @@ $script:ControlCatalog = @(
 
     [pscustomobject]@{
         Id          = 'driver-blocklist'
+        PlatformRequirements = @('64Bit')
         Name        = 'Microsoft vulnerable driver blocklist'
         PlainName   = 'Known-bad driver blocking'
         Category    = 'Kernel'

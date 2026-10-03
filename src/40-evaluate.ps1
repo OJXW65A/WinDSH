@@ -89,61 +89,44 @@ function Get-ControlSupport {
     #>
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
 
-    if (-not $State.Computer.Is64Bit) {
-        return [pscustomobject]@{ Supported = $false; Reason = 'These protections require a 64-bit version of Windows.'; Fix = $null }
+    $requirements = @(ConvertTo-Array $Control.PlatformRequirements)
+    foreach ($requirement in $requirements) {
+        switch ($requirement) {
+            '64Bit' {
+                if (-not $State.Computer.Is64Bit) { return [pscustomobject]@{ Supported = $false; Reason = 'This protection requires a 64-bit version of Windows.'; Fix = $null } }
+            }
+            'Hypervisor' {
+                if ($State.HypervisorLaunch.BlocksVbs) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'The Windows hypervisor is switched off in the boot configuration, so this protection cannot start.'; Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.' }
+                }
+            }
+            'Uefi' {
+                if (-not $State.Firmware.IsUefiConfirmed) {
+                    return [pscustomobject]@{ Supported = $false; Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode); Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.' }
+                }
+            }
+            'Virtualization' {
+                if (-not $State.Virtualization.FirmwareEnabled) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'CPU virtualization is turned off in firmware.'; Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.' }
+                }
+            }
+            'Tpm2' {
+                if (-not $State.Tpm.IsTPM2) {
+                    return [pscustomobject]@{ Supported = $false; Reason = 'TPM 2.0 was not confirmed, and this protection needs it to store boot measurements.'; Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.' }
+                }
+            }
+            'CredentialGuardEdition' {
+                $edition = [string]$State.Computer.EditionId
+                if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
+                    return [pscustomobject]@{ Supported = $false; Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition); Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.' }
+                }
+            }
+            default { throw ('Unknown platform requirement {0} in control {1}.' -f $requirement, $Control.Id) }
+        }
     }
     $minBuild = Get-PropertySafe $Control 'MinimumBuild' $null
     if ($null -ne $minBuild -and $State.Computer.BuildNumber -gt 0 -and $State.Computer.BuildNumber -lt [int]$minBuild) {
-        return [pscustomobject]@{
-            Supported = $false
-            Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber)
-            Fix = 'Update Windows to a newer feature release.'
-        }
-    }
-
-    if ($Control.Category -ne 'Kernel' -or $Control.Id -ne 'driver-blocklist') {
-        if ($Control.Id -ne 'driver-blocklist') {
-            if ($State.HypervisorLaunch.BlocksVbs) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = 'The Windows hypervisor is switched off in the boot configuration, so no protection of this kind can start.'
-                    Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.'
-                }
-            }
-            if (-not $State.Firmware.IsUefiConfirmed) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode)
-                    Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.'
-                }
-            }
-            if (-not $State.Virtualization.FirmwareEnabled) {
-                return [pscustomobject]@{
-                    Supported = $false
-                    Reason = 'CPU virtualization is turned off in firmware.'
-                    Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.'
-                }
-            }
-        }
-    }
-
-    if ($Control.Id -eq 'secure-launch' -and -not $State.Tpm.IsTPM2) {
-        return [pscustomobject]@{
-            Supported = $false
-            Reason = 'TPM 2.0 was not confirmed, and Secure Launch needs it to store boot measurements.'
-            Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.'
-        }
-    }
-
-    if ($Control.Id -eq 'credential-guard') {
-        $edition = [string]$State.Computer.EditionId
-        if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
-            return [pscustomobject]@{
-                Supported = $false
-                Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition)
-                Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.'
-            }
-        }
+        return [pscustomobject]@{ Supported = $false; Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber); Fix = 'Update Windows to a newer feature release.' }
     }
 
     return [pscustomobject]@{ Supported = $true; Reason = $null; Fix = $null }
@@ -284,6 +267,8 @@ function Get-SecurityScore {
         Possible = [math]::Round($possible, 1)
         ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
         Breakdown = $breakdown
+        ApplicableCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.Supported }).Count
+        TotalCount = @($Statuses | Where-Object { $_.Weight -gt 0 }).Count
     }
 }
 
@@ -370,10 +355,10 @@ function Get-CisComplianceReport {
 # ---------------------------------------------------------------------------
 
 function Get-ControlExplanation {
-    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State)
+    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)]$State, $Status)
 
     $control = Get-Control -Id $Id
-    $status = Get-ControlStatus -Id $Id -State $State
+    $status = if ($Status) { $Status } else { Get-ControlStatus -Id $Id -State $State }
 
     $verdict = $null; $action = $null; $severity = 'Info'
 
@@ -422,7 +407,8 @@ function Get-ControlExplanation {
         if ($preflight -and $preflight.Tripped) {
             $verdict = ('{0} is not configured, and enabling it right now looks risky.' -f $control.Name)
             $lines = @($preflight.Message, '')
-            $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount)
+            if ($preflight.Queried) { $lines += ('  {0} compatibility event(s) in the last 14 days.' -f $preflight.EventCount) }
+            elseif ($preflight.Error) { $lines += ('  Log query failed: {0}' -f $preflight.Error) }
             foreach ($d in (ConvertTo-Array $preflight.Drivers)) {
                 $who = if ($d.Publisher) { $d.Publisher } else { 'unknown publisher' }
                 $ver = if ($d.Version) { $d.Version } else { 'unknown version' }
@@ -430,7 +416,7 @@ function Get-ControlExplanation {
                 $lines += ('  - {0} ({1}, {2}){3}' -f $d.FileName, $who, $ver, $svc)
             }
             $lines += ''
-            $lines += '  Update or remove the driver above, restart, then run the audit again.'
+            $lines += $(if ($preflight.Queried) { '  Update or remove the driver above, restart, then run the audit again.' } else { '  Restore access to the Code Integrity log, then run the audit again. Automatic remediation will skip this protection.' })
             $action = ($lines -join "`n")
             $severity = 'Warn'
         }
@@ -499,5 +485,18 @@ function Get-HardwareCapabilityAdvice {
         default {
             return 'Everything Windows can verify is in order. The remaining explanation is that this hardware or firmware does not provide the capability.'
         }
+    }
+}
+
+function Get-Assessment {
+    param([Parameter(Mandatory = $true)]$State)
+    $statuses = @(Get-AllControlStatus -State $State)
+    return [pscustomobject]@{
+        State = $State
+        Statuses = $statuses
+        Score = Get-SecurityScore -Statuses $statuses
+        SecuredCore = Get-SecuredCoreVerdict -State $State -Statuses $statuses
+        Cis = Get-CisComplianceReport -State $State -Statuses $statuses
+        Explanations = @($statuses | ForEach-Object { Get-ControlExplanation -Id $_.Id -State $State -Status $_ })
     }
 }
