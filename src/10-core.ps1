@@ -277,15 +277,20 @@ function New-RegistryProvider {
             }
             catch { return $false }
         }
+        GetKind = {
+            param([string]$Path, [string]$Name)
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return $key.GetValueKind($Name).ToString()
+        }
         SetValue = {
             param([string]$Path, [string]$Name, [string]$Type, $Value)
-            if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
-            New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Type -Value $Value -Force | Out-Null
+            if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+            New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType $Type -Value $Value -Force -ErrorAction Stop | Out-Null
         }
         RemoveValue = {
             param([string]$Path, [string]$Name)
             if (-not (Test-Path -LiteralPath $Path)) { return }
-            Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction SilentlyContinue
+            Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop
         }
     }
 }
@@ -293,13 +298,15 @@ function New-RegistryProvider {
 function New-InMemoryRegistryProvider {
     param([hashtable]$Seed)
     $store = @{}
-    if ($Seed) { foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k] } }
+    $kinds = @{}
+    if ($Seed) { foreach ($k in $Seed.Keys) { $store[$k] = $Seed[$k]; $kinds[$k] = 'DWord' } }
 
     # GetNewClosure binds $store into each scriptblock; without it they resolve
     # $store in the caller's scope at invocation time and fail.
     return @{
         Kind = 'InMemory'
         Store = $store
+        Kinds = $kinds
         GetValue = {
             param([string]$Path, [string]$Name)
             $key = '{0}|{1}' -f $Path, $Name
@@ -310,14 +317,19 @@ function New-InMemoryRegistryProvider {
             param([string]$Path, [string]$Name)
             return $store.ContainsKey(('{0}|{1}' -f $Path, $Name))
         }.GetNewClosure()
+        GetKind = {
+            param([string]$Path, [string]$Name)
+            return $kinds[('{0}|{1}' -f $Path, $Name)]
+        }.GetNewClosure()
         SetValue = {
             param([string]$Path, [string]$Name, [string]$Type, $Value)
+            $kinds[('{0}|{1}' -f $Path, $Name)] = $Type
             $store[('{0}|{1}' -f $Path, $Name)] = $Value
         }.GetNewClosure()
         RemoveValue = {
             param([string]$Path, [string]$Name)
             $key = '{0}|{1}' -f $Path, $Name
-            if ($store.ContainsKey($key)) { $store.Remove($key) }
+            if ($store.ContainsKey($key)) { $store.Remove($key); $kinds.Remove($key) }
         }.GetNewClosure()
     }
 }
@@ -326,6 +338,7 @@ $script:Registry = New-RegistryProvider
 
 function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
+function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
 
 # ---------------------------------------------------------------------------
