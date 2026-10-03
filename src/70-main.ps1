@@ -422,7 +422,7 @@ function Invoke-Main {
         Write-Section 'Control catalog'
         foreach ($c in $script:ControlCatalog) {
             $cisText = if ($c.Cis) { $c.Cis.Id } else { '-' }
-            Write-Line ('{0,-22} {1,-8} weight {2,-4} {3}' -f $c.Id, $cisText, $c.Weight, $c.Name) 'Plain'
+            Write-Line ('{0,-25} {1,-8} weight {2,-4} {3}' -f $c.Id, $cisText, $c.Weight, $c.Name) 'Plain'
             Write-Line $c.Summary 'Dim' 4
         }
         $script:ExitCode = 0; return

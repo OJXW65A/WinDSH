@@ -1,6 +1,6 @@
 # WinDSH
 
-[![WinDSH CI](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml/badge.svg)](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml)
+[![WinDSH CI](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml)
 
 **Windows Device Security Helper** audits Windows platform security, explains why a
 protection is not running, and optionally configures supported local settings.
@@ -9,23 +9,29 @@ comparison with CIS Device Guard policy settings.
 
 **Contact:** windsh@rootauthority.com
 
+**Version status:** `main` contains v2.0.0 development code. The latest published
+release is currently v1.5.0. The examples below describe v2; see the
+[v1.5.0 README](https://github.com/OJXW65A/WinDSH/blob/v1.5.0/README.md)
+for the released version.
+
 ## Download
 
-**[Download WinDSH.zip](https://github.com/OJXW65A/WinDSH/releases/latest/download/WinDSH.zip)**
+**[Download the latest public release](https://github.com/OJXW65A/WinDSH/releases/latest)**
 
-The ZIP contains only the two files needed to run WinDSH:
+Download the ZIP from the release page, right-click it, choose **Extract All**,
+then open the folder containing **WinDSH.ps1** and double-click
+**Run-WinDSH-AsAdmin.bat**.
+Approve the administrator prompt and keep the launcher beside **WinDSH.ps1**.
 
-- `Run-WinDSH-AsAdmin.bat` — launcher that requests Administrator rights.
-- `WinDSH.ps1` — the complete WinDSH application.
+The next release will include **WinDSH.zip**, containing only these two files.
+The ZIP is not yet a published release asset.
 
-Right-click the downloaded ZIP and choose **Extract All**, then open the extracted
-folder, double-click **Run-WinDSH-AsAdmin.bat**, and approve the administrator prompt.
-Keep both extracted files together in the same folder.
+To test the v2 development version now, download both files into the same folder:
 
-The single-file download will be available when the next release is published.
-Until then, download [Run-WinDSH-AsAdmin.bat](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/Run-WinDSH-AsAdmin.bat)
-and [WinDSH.ps1](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/WinDSH.ps1) separately
-into the same folder. If a link opens as text, right-click it and choose **Save link as...**.
+- [Run-WinDSH-AsAdmin.bat](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/Run-WinDSH-AsAdmin.bat)
+- [WinDSH.ps1](https://github.com/OJXW65A/WinDSH/raw/refs/heads/main/WinDSH.ps1)
+
+If a file opens as text, right-click its link and choose **Save link as...**.
 
 ## Requirements
 
@@ -48,188 +54,44 @@ interactive menu and standard UAC elevation, or run from PowerShell:
 .\WinDSH.ps1 -Revert                          # undo the newest open change run
 ```
 
-## Controls
+## What it checks
 
-| ID | Protection | Configurable | CIS 18.9.5 |
-|---|---|---|---|
-| `vbs` | Virtualization-based Security | Yes | 18.9.5.1 |
-| `platform-security` | Secure Boot requirement for VBS | Yes | 18.9.5.2 |
-| `hvci` | Memory Integrity | Yes | 18.9.5.3 |
-| `hvci-mat` | Require UEFI Memory Attributes Table | Yes | 18.9.5.4 |
-| `credential-guard` | Credential Guard | Yes | 18.9.5.5 |
-| `secure-launch` | System Guard Secure Launch | Yes | 18.9.5.6 |
-| `kernel-shadow-stacks` | Kernel-mode hardware stack protection | Yes | 18.9.5.7 |
-| `driver-blocklist` | Microsoft vulnerable driver blocklist | Yes | — |
-| `hvpt` | Hypervisor-enforced Paging Translation | Report only | — |
-| `smm-firmware-measurement` | SMM Firmware Measurement | Report only | — |
-| `dep` | Data Execution Prevention | Report only | — |
+WinDSH reports TPM, UEFI/Secure Boot, Virtualization-based Security, Memory Integrity,
+Credential Guard, System Guard Secure Launch, kernel shadow stacks, the vulnerable
+driver blocklist, DEP, DMA/SMM capabilities, and pending restarts.
 
-WinDSH also reports TPM, UEFI/Secure Boot, CPU virtualization, hypervisor launch
-configuration, DMA/SMM capabilities, pending restarts, and virtual-machine context.
-DEP is evaluated independently of VBS prerequisites.
+The report includes an applicable protection score, Secured-core assessment, CIS
+comparison, and explanations of unsupported or inactive protections.
+See the [control catalog and command reference](docs/USAGE.md).
 
-## Remediation and safety
+## Safety and signing
 
-`-EnableAllSafe` selects `vbs`, `platform-security`, `hvci-mat`, `hvci`, and
-`driver-blocklist`. Unsupported and policy-managed settings are skipped.
-Credential Guard, Secure Launch, and kernel shadow stacks remain opt-in:
+WinDSH detects organization policy and hardware limits before proposing changes.
+`-WhatIf` previews changes; remediation records a journal for conflict-aware rollback.
+The Group Policy hive is read only. WinDSH does not manage encryption, clear the TPM,
+change Secure Boot keys or antivirus configuration, or download and execute code.
 
-```powershell
-.\WinDSH.ps1 -Enable credential-guard
-.\WinDSH.ps1 -Enable hvci,driver-blocklist
-```
+The current launcher uses process-scoped `-ExecutionPolicy Bypass`; organization
+Group Policy still takes precedence. Releases are unsigned. Verify published files
+against the release's SHA-256 checksums. The internal integrity check detects
+accidental corruption and does not authenticate the publisher.
 
-Memory Integrity is skipped if recent Code Integrity event 3087 evidence exists
-or the compatibility log cannot be queried. This applies to both the safe set and
-explicit unattended `-Enable hvci`. An override requires selecting the protection
-in the **interactive specific-protection menu**, reading the warning, and typing
-`hvci`. Unattended invocation never substitutes for that typed confirmation.
-No matching events means the log check passed; it does not prove every driver is compatible.
-Preview and execution use the same support, policy, dependency, and preflight decisions.
+Test remediation on representative Windows systems before organizational deployment.
+Re-audit after restarting to confirm that configured protections are running.
 
-The interactive menu provides re-check, safe remediation, per-control explanations,
-report saving, specific-control remediation, rollback, CIS comparison, Windows Security,
-firmware guidance, and driver diagnostics. Technical details are available with `-Advanced`.
+## Documentation
 
-WinDSH never writes `HKLM\SOFTWARE\Policies`, clears/provisions the TPM, changes Secure
-Boot keys, manages BitLocker, changes antivirus configuration, or downloads/executes
-remote code. Firmware actions are guidance; the firmware restart option requires consent.
-Registry configuration does not guarantee the protection is running; check again after restarting.
-
-## Command-line options
-
-| Option | Behavior |
+| Guide | Contents |
 |---|---|
-| `-AuditOnly` | Audit without changing security settings. |
-| `-EnableAllSafe` | Apply the conservative set without ordinary prompts. |
-| `-Enable <ids>` | Apply specific controls and their dependencies; comma-separated IDs are accepted. |
-| `-Revert [-RunId <id>]` | Restore completed journal writes that still match current state. |
-| `-ListControls` / `-Explain <id>` | List controls or explain one control and exit. |
-| `-HtmlReport`, `-TextReport`, `-JsonReport` | Select report formats; switches can be combined. |
-| `-NoReport` | Suppress report files. |
-| `-ReportDirectory <path>` | Override the report directory. |
-| `-Rmm` | Unattended operation with one compact JSON object on stdout. |
-| `-Advanced` / `-NoColor` | Full console details / disable color; `NO_COLOR` is honored. |
-| `-AutoReboot` | Restart after a successful unattended change run when required. |
-| `-DebugLogPath <path>` | Enable diagnostics at the specified existing parent directory. |
-| `-SelfTest` / `-Version` | Run synthetic tests / print the version, without elevation. |
-| `-WhatIf` | Preview security changes without modifying the registry or journal. |
+| [Usage](docs/USAGE.md) | Controls, command-line options, reports, scoring, rollback, exit codes |
+| [Contributing](CONTRIBUTING.md) | Source layout, builds, tests, contribution rules |
+| [Release process](docs/RELEASING.md) | Release validation, packaging, publication, repository maintenance |
+| [Security policy](SECURITY.md) | Supported versions and private vulnerability reporting |
+| [Code signing policy](CODE_SIGNING_POLICY.md) | Current signing status and future signing requirements |
+| [Changelog](CHANGELOG.md) | Released and upcoming changes |
 
-Use one change mode at a time. `-AuditOnly` cannot accompany changes; `-RunId` requires
-`-Revert`. Report-only controls cannot be passed to `-Enable`.
-There are no `-DebugLog` or `-ReportFormat` parameters.
-
-## Reports and automation
-
-Normal unattended runs write **HTML by default**. Reports go to
-`Desktop\WinDSH-Reports`, with a temporary-directory fallback if Desktop is unavailable.
-Select additional or alternative formats explicitly:
-
-```powershell
-.\WinDSH.ps1 -AuditOnly -HtmlReport -TextReport -JsonReport
-.\WinDSH.ps1 -AuditOnly -JsonReport -ReportDirectory 'C:\Reports'
-.\WinDSH.ps1 -AuditOnly -DebugLogPath 'C:\Temp\WinDSH-Debug.log'
-```
-
-RMM mode requires an already-elevated agent; it does not request UAC. It produces
-no report files by default. Explicit report switches also work in RMM mode:
-
-```powershell
-.\WinDSH.ps1 -AuditOnly -Rmm
-.\WinDSH.ps1 -EnableAllSafe -Rmm -TextReport -ReportDirectory 'C:\Reports'
-```
-
-The JSON stdout `exitCode` matches the process exit code. A partial failure takes
-precedence over restart-required success. Custom report/debug paths are written
-with administrator privileges after elevation; select trusted locations.
-Reports and debug logs are local and are never uploaded automatically.
-
-## Score and CIS interpretation
-
-The **applicable protection score** is weighted across scored controls whose platform
-requirements are met. Unsupported controls are excluded; reports show how many scored
-controls are applicable. A score of 100 on limited hardware is not equivalent to
-Secured-core qualification, and is not an overall measure of endpoint security.
-Detection-only controls have zero scoring weight.
-
-The comparison targets **CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0,
-section 18.9.5**. CIS checks the Group Policy hive; WinDSH writes local values under
-`HKLM\SYSTEM\CurrentControlSet\Control` and never writes Group Policy. Protections
-can run while the policy-based CIS checks still fail. WinDSH also enables Memory
-Integrity and Credential Guard **without UEFI locks** so those changes can be undone
-from Windows; the mapped CIS settings require the locked form.
-
-## Rollback
-
-The journal is `%ProgramData%\WinDSH\changes.jsonl`. The directory is restricted to
-Administrators and SYSTEM, and an exclusive lock serializes WinDSH change operations.
-Each write has an intent record and a completion marker. Revert validates targets
-against the control catalog and checks current registry values **and types** before restoring.
-A value absent before the run is removed rather than set to zero.
-
-```powershell
-.\WinDSH.ps1 -Revert
-.\WinDSH.ps1 -Revert -RunId 'your-run-id'
-.\WinDSH.ps1 -Revert -RunId 'your-run-id' -WhatIf -NoReport
-```
-
-Later administrator changes are preserved and reported as conflicts. Successfully
-restored entries are recorded and not repeated; completed runs are excluded from
-selection. Conflicted entries remain available for retry. A write interrupted before
-its completion marker is **ambiguous** and requires manual review; WinDSH never assumes
-that an intent proves it changed the registry. Legacy journals are accepted with
-catalog/current-state checks, but lack original write-completion evidence.
-Malformed terminated or middle records block change operations; only a torn final
-append is recoverable. Keep the journal when troubleshooting an interrupted run.
-The inherited `WINDSH_JOURNAL_PATH` environment variable is ignored.
-
-## Exit codes and restart
-
-| Code | Meaning |
-|---:|---|
-| `0` | Completed successfully; no WinDSH restart required. |
-| `1` | Invalid usage, startup/runtime failure, or remediation stopped by an error. |
-| `2` | Completed with warnings, including skipped requested protections. |
-| `3` | Integrity failure; security changes are disabled. |
-| `4` | Administrator rights were unavailable. |
-| `5` | Revert failed or encountered unresolved conflicts. |
-| `3010` | Completed successfully; restart required. |
-
-An existing Windows restart request does not mean WinDSH changed anything.
-`-AutoReboot` is opt-in, for unattended change runs only; it does not restart after
-failed operations or during `-WhatIf`. Re-audit after restarting to confirm actual running state.
-
-## Execution policy and code signing
-
-The current batch launcher and self-elevation path use **process-scoped
-`-ExecutionPolicy Bypass`**. They do not change persistent execution policy or remove
-Mark of the Web. `MachinePolicy` and `UserPolicy` still take precedence. The maintainer's
-choice of launcher policy remains open; this audit fix preserves the current behavior.
-
-Releases are currently **unsigned**. Compare downloads with the release's SHA-256
-checksums. The internal integrity check detects accidental corruption, not malicious
-publisher impersonation. Signing remains a goal; the SignPath Foundation application
-was declined on public-visibility grounds and no signing sponsorship is in place.
-See [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
-
-## Development and testing
-
-`WinDSH.ps1` is generated from `src/`; never edit it directly.
-
-```powershell
-.\build\Build-WinDSH.ps1
-.\WinDSH.ps1 -SelfTest
-Invoke-Pester -Path .\tests
-.\build\Build-WinDSH.ps1 -Check
-```
-
-CI checks PowerShell 5.1 and 7, syntax, build freshness, analyzer errors, synthetic
-regressions, native child-process argument round-trips, and real Windows apply/revert
-on a disposable test registry key. Live audit smoke tests exercise Windows collectors.
-Hardware-affecting remediation still requires testing on representative Windows VMs
-or physical machines before broad deployment.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+For bugs and feature requests, [open an issue](https://github.com/OJXW65A/WinDSH/issues/new/choose).
+Report security vulnerabilities privately to **windsh@rootauthority.com**.
 
 ## Support WinDSH
 
@@ -249,15 +111,6 @@ its features, source code, or support for the MIT-licensed project.
   <img src="assets/bitcoin-qr.png" alt="Bitcoin donation QR code" width="200">
 </p>
 
----
-
 ## License
 
-WinDSH is licensed under the [MIT License](LICENSE).
-
----
-
-## Deployment caution
-
-Test changes on representative systems before organizational deployment. Drivers,
-firmware, Windows editions, and policy can prevent configured protections from running.
+WinDSH is distributed under the [MIT License](LICENSE).

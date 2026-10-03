@@ -107,13 +107,14 @@ Administrator permission is required for remediation actions.
 
 ## Authenticity
 
-Current development releases may not yet have a publicly trusted Authenticode
-signature.
+Current releases are unsigned. There is no code signing certificate or sponsorship
+associated with the project. See [the code signing policy](CODE_SIGNING_POLICY.md).
 
 Official releases should only be obtained from:
 
 https://github.com/OJXW65A/WinDSH/releases
 
-Release hashes are published where available.
+Compare release downloads with the published SHA-256 checksums. The script's internal
+integrity check detects accidental corruption; it does not authenticate the publisher.
 
 Publicly trusted Authenticode signing is planned for a future mature release.

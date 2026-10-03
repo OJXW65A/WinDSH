@@ -1,38 +1,14 @@
 # WinDSH changelog
 
-## Unreleased — public download
-
-- Add `WinDSH.zip` to release assets, containing only `Run-WinDSH-AsAdmin.bat` and
-  `WinDSH.ps1`, with SHA-256 checksums and build provenance. Document extraction
-  and launch steps in the public download section.
-
-## Unreleased — audit safety fixes
-
-- Separate safe-set intent from explicit control selection. HVCI preflight fails closed
-  on inaccessible logs; known incompatibilities require real interactive typed consent.
-  Preview includes preflight and dependency blockers.
-- Make rollback conflict-aware, type-aware, and non-repeatable. Track completed writes
-  and restored entries, serialize operations, validate catalog targets, protect journal
-  permissions, and preserve ambiguous interrupted writes for manual review.
-- Ignore inherited journal path overrides in production.
-- Declare platform requirements per control so DEP does not inherit VBS requirements.
-- Refresh status, score, CIS, Secured-core, and explanations as one assessment after changes.
-- Preserve command-line intent through elevation; test native Windows argv round-trips.
-- Support explicitly selected RMM report formats and consistent process/JSON exit codes;
-  do not mask partial failures with restart success.
-- Clarify applicable-score semantics and synchronize README/CONTRIBUTING with the CLI,
-  including current process-scoped launcher policy without changing that behavior.
-- Pin GitHub Actions to commit SHAs and PSGallery packages to verified SHA-256 hashes;
-  remove the unused release dry-run input and add dependency update configuration.
-- Expand rollback, preflight, interactive, automation, native-argv, and disposable-key
-  Windows provider regression coverage. Hardware-affecting remediation remains a manual
-  test on representative systems before release.
-
-## v2.0.0
+## v2.0.0 — Unreleased
 
 Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new internals.
 
 ### Added
+
+- Add `WinDSH.zip` to release assets, containing only `Run-WinDSH-AsAdmin.bat` and
+  `WinDSH.ps1`, with SHA-256 checksums and build provenance. Document extraction
+  and launch steps in the public download section.
 
 - **Security score out of 100** with a grade, weighted across the controls this machine
   can actually run. Controls the hardware cannot support are excluded from the total
@@ -81,6 +57,26 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 
 ### Fixed
 
+- Separate safe-set intent from explicit control selection. HVCI preflight fails closed
+  on inaccessible logs; known incompatibilities require real interactive typed consent.
+  Preview includes preflight and dependency blockers.
+- Make rollback conflict-aware, type-aware, and non-repeatable. Track completed writes
+  and restored entries, serialize operations, validate catalog targets, protect journal
+  permissions, and preserve ambiguous interrupted writes for manual review.
+- Ignore inherited journal path overrides in production.
+- Declare platform requirements per control so DEP does not inherit VBS requirements.
+- Refresh status, score, CIS, Secured-core, and explanations as one assessment after changes.
+- Preserve command-line intent through elevation; test native Windows argv round-trips.
+- Support explicitly selected RMM report formats and consistent process/JSON exit codes;
+  do not mask partial failures with restart success.
+- Clarify applicable-score semantics and synchronize README/CONTRIBUTING with the CLI,
+  including current process-scoped launcher policy without changing that behavior.
+- Pin GitHub Actions to commit SHAs and PSGallery packages to verified SHA-256 hashes;
+  remove the unused release dry-run input and add dependency update configuration.
+- Expand rollback, preflight, interactive, automation, native-argv, and disposable-key
+  Windows provider regression coverage. Hardware-affecting remediation remains a manual
+  test on representative systems before release.
+
 - `RequirePlatformSecurityFeatures` was written as `1` unconditionally, silently weakening
   a machine an administrator had set to `3` (Secure Boot + DMA protection). It is now
   treated as a floor, so a stronger existing value is preserved.
@@ -97,6 +93,15 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 - Action results are no longer buried: each action waits for a keypress, and remediation
   no longer reprints the whole audit over its own output.
 
+### Maintenance
+
+- Separate the public quick start from the detailed usage guide and document the
+  release process. Correct stale validation and signing statements.
+- Add issue and pull request templates, editor/line-ending settings, and syntax
+  coverage for build and test scripts. Remove the unused duplicate QR image.
+- Include the MIT notice in the distributable script while keeping the public ZIP
+  limited to the launcher and application. Align the control catalog output.
+
 ### Unchanged by design
 
 - No BitLocker or encryption management. BitLocker status is read only, to warn before
@@ -106,3 +111,10 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 - No network access, no encoded commands, no remote downloads.
 - The self-integrity check detects accidental corruption and is not a security boundary.
 - WinDSH is not code signed. See `CODE_SIGNING_POLICY.md`.
+
+## v1.5.0 — 2026-09-09
+
+First public release. Includes Windows platform security auditing, interactive
+remediation, preview mode, text/JSON reports, RMM output, and PowerShell 5.1 support.
+
+See the [v1.5.0 release notes](https://github.com/OJXW65A/WinDSH/releases/tag/v1.5.0).

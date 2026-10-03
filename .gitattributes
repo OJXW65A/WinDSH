@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+# Preserve the generated script and Windows launcher bytes used in ZIP checksums.
+/WinDSH.ps1 -text -eol
+*.bat -text -eol
+
+*.png -text -eol
+*.jpg -text -eol
+*.JPG -text -eol
+*.zip -text -eol
