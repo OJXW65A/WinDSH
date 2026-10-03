@@ -192,6 +192,7 @@ function Write-RmmOutput {
         warnings = @($script:Warnings).Count
         exitCode = $script:ExitCode
     }
+    $script:RmmOutputWritten = $true
     Write-Output ($payload | ConvertTo-Json -Depth 8 -Compress)
 }
 
@@ -575,12 +576,27 @@ function Get-FinalExitCode {
     return 0
 }
 
-# Invoke-Main sets $script:ExitCode itself. Its output is NOT captured, so RMM mode
-# can emit its JSON object on stdout for a pipeline to consume.
-try { Invoke-Main }
-catch {
-    $script:ExitCode = 1
-    if ($Rmm) { Write-Output (([pscustomobject]@{ tool = $script:ToolName; exitCode = 1; error = $_.Exception.Message }) | ConvertTo-Json -Compress) }
-    else { Write-Line ('WinDSH failed: {0}' -f $_.Exception.Message) 'Bad' }
+function Invoke-EntryPoint {
+    $script:RmmOutputWritten = $false
+    $failureMessage = $null
+    try { Invoke-Main }
+    catch {
+        $script:ExitCode = 1
+        $failureMessage = $_.Exception.Message
+        if (-not $Rmm) { Write-Line ('WinDSH failed: {0}' -f $failureMessage) 'Bad' }
+    }
+    # Validation/elevation failures return before assessment. Automation still gets
+    # one JSON result rather than a silent exit or mixed diagnostic output.
+    if ($Rmm -and -not $script:RmmOutputWritten -and -not ($Version -or $ListControls -or $SelfTest)) {
+        if (-not $failureMessage) { $failureMessage = Get-ExitCodeMeaning -Code $script:ExitCode }
+        Write-Output (([pscustomobject]@{
+            schemaVersion = $script:SchemaVersion; tool = $script:ToolName
+            version = $script:ToolVersion; exitCode = $script:ExitCode
+            restartRequired = $script:RestartRequired; error = $failureMessage
+        }) | ConvertTo-Json -Compress)
+    }
 }
+
+# Invoke-Main sets its exit code; do not capture stdout in the entry point.
+Invoke-EntryPoint
 exit $script:ExitCode

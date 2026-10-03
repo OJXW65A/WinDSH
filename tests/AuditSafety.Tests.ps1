@@ -10,7 +10,6 @@ BeforeAll {
         else { . $module.FullName }
     }
     $PowerShellExe = (Get-Process -Id $PID).Path
-    $OnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 }
 
 Describe 'Safety decisions and consistent projections' {
@@ -71,6 +70,28 @@ Describe 'Safety decisions and consistent projections' {
         Test-RegValue $script:RegHvci 'Enabled' | Should -BeFalse
     }
 
+    It 'allows an enabled running policy-managed dependency without modifying it' {
+        $testState.Policy.Values['EnableVirtualizationBasedSecurity'] = 1
+        $testState.DeviceGuard.VbsStatusCode = 2
+        $plan = @(Get-ChangePlan -Ids @('hvci') -State $testState)
+        @($plan | Where-Object ControlId -eq 'vbs')[0].SkipReason | Should -Be 'Managed by Group Policy'
+        @($plan | Where-Object ControlId -eq 'hvci')[0].SkipReason | Should -BeNullOrEmpty
+        $result = Invoke-ControlApply -Ids @('hvci') -State $testState
+        Test-RegValue $script:RegDeviceGuard 'EnableVirtualizationBasedSecurity' | Should -BeFalse
+        Get-RegValue $script:RegHvci 'Enabled' | Should -Be 1
+    }
+
+    It 'reports unexpected registry types consistently in assessment, preview, and apply' {
+        & $script:Registry.SetValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' 'String' 'unexpected'
+        (Get-ControlStatus -Id 'driver-blocklist' -State $testState).Configured | Should -BeFalse
+        $plan = @(Get-ChangePlan -Ids @('driver-blocklist') -State $testState)
+        $plan[0].SkipReason | Should -Match 'unexpected type'
+        $result = Invoke-ControlApply -Ids @('driver-blocklist') -State $testState
+        $result.ChangeCount | Should -Be 0
+        $result.Skipped[0].Reason | Should -Be $plan[0].SkipReason
+        Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' | Should -BeExactly 'unexpected'
+    }
+
     It 'WhatIf never creates a journal or lock or changes the provider' {
         $result = Invoke-ControlApply -Ids @('driver-blocklist') -State $testState -WhatIf
         $result.ChangeCount | Should -Be 0
@@ -87,6 +108,25 @@ Describe 'Safety decisions and consistent projections' {
         $payload = $lines[0] | ConvertFrom-Json
         $payload.exitCode | Should -Be 2
         $script:ExitCode | Should -Be $payload.exitCode
+    }
+
+    It 'returns one structured RMM error when elevation is unavailable' {
+        $AuditOnly = $true; $Rmm = $true
+        Mock Test-IsElevated { $false }
+        Mock Request-Elevation { $false }
+        $lines = @(Invoke-EntryPoint)
+        $lines.Count | Should -Be 1
+        ($lines[0] | ConvertFrom-Json).exitCode | Should -Be 4
+        $script:ExitCode | Should -Be 4
+    }
+
+    It 'returns one structured RMM error for startup failures' {
+        $AuditOnly = $true; $Rmm = $true
+        Mock Get-SystemState { throw 'Synthetic provider failure' }
+        $lines = @(Invoke-EntryPoint)
+        $lines.Count | Should -Be 1
+        ($lines[0] | ConvertFrom-Json).exitCode | Should -Be 1
+        ($lines[0] | ConvertFrom-Json).error | Should -Match 'Synthetic provider failure'
     }
 
     It 'writes explicitly requested RMM reports while emitting only one JSON object' {
@@ -117,6 +157,18 @@ Describe 'Safety decisions and consistent projections' {
         Get-RegValue $script:RegDeviceGuard 'Locked' | Should -Be 2
     }
 
+    It 'keeps an RMM revert preview silent and leaves its journal and registry unchanged' {
+        $run = Invoke-ControlApply -Ids @('driver-blocklist') -State $testState
+        $journalBefore = [IO.File]::ReadAllText($script:TestJournalPath)
+        $script:RestartRequired = $false
+        $Revert = $true; $RunId = $run.RunId; $Rmm = $true; $WhatIfPreference = $true
+        $lines = @(Invoke-EntryPoint *>&1)
+        $lines.Count | Should -Be 1
+        ($lines[0] | ConvertFrom-Json).exitCode | Should -Be 0
+        [IO.File]::ReadAllText($script:TestJournalPath) | Should -BeExactly $journalBefore
+        Get-RegValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable' | Should -Be 1
+    }
+
     It 'refreshes all report projections after interactive safe remediation' {
         $script:Unattended = $false
         $script:MenuReads = 0
@@ -136,6 +188,30 @@ Describe 'Safety decisions and consistent projections' {
         @($script:SavedAssessment.Explanations | Where-Object Id -eq 'driver-blocklist')[0].Status.Configured | Should -BeTrue
         @($script:SavedAssessment.Explanations | Where-Object Id -eq 'hvci')[0].Status.Configured | Should -BeTrue
         $script:SavedAssessment.Cis.RunningButNotCompliantCount | Should -Be $fresh.Cis.RunningButNotCompliantCount
+    }
+
+    It 'rejects a competing change operation from another PowerShell process' {
+        $child = Join-Path $TestDrive 'lock-child.ps1'
+        $childSource = @'
+param([string]$Root, [string]$Journal)
+foreach ($name in @('10-core.ps1','20-catalog.ps1','30-state.ps1','40-evaluate.ps1','50-apply.ps1','65-selftest.ps1')) {
+    . (Join-Path (Join-Path $Root 'src') $name)
+}
+Set-RegistryProvider (New-InMemoryRegistryProvider)
+$script:TestJournalPath = $Journal
+$script:Unattended = $true
+try { [void](Invoke-ControlApply -Ids @('vbs') -State (New-SyntheticState)); exit 0 }
+catch { Write-Output $_.Exception.Message; exit 42 }
+'@
+        [IO.File]::WriteAllText($child, $childSource)
+        $held = Enter-JournalLock
+        try {
+            $output = @(& $PowerShellExe -NoProfile -NonInteractive -File $child -Root $RepoRoot -Journal $script:TestJournalPath 2>&1)
+            $LASTEXITCODE | Should -Be 42
+            ($output -join "`n") | Should -Match 'Another WinDSH change operation'
+            Test-Path $script:TestJournalPath | Should -BeFalse
+        }
+        finally { $held.Dispose() }
     }
 
     It 'reverts repeated writes to the same registry value in reverse order' {

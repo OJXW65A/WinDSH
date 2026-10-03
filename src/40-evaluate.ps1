@@ -61,10 +61,10 @@ function Test-ControlConfigured {
     $all = $true
     foreach ($value in (ConvertTo-Array $Control.LocalValues)) {
         $current = Get-RegValue -Path $value.Path -Name $value.Name
-        if ($null -eq $current) { $all = $false; break }
+        if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; break }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        if ($comparison -eq 'AtLeast') { if ([int]$current -lt [int]$value.Value) { $all = $false; break } }
-        else { if ([int]$current -ne [int]$value.Value) { $all = $false; break } }
+        if ($comparison -eq 'AtLeast') { if ([long]$current -lt [long]$value.Value) { $all = $false; break } }
+        else { if ([long]$current -ne [long]$value.Value) { $all = $false; break } }
     }
     return $all
 }

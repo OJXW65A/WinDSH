@@ -126,7 +126,7 @@ $script:SchemaVersion   = '2.0'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = '7c69ea0f53e99e3450355dc2106dd6c791ecd1b53c5f16a8c237a9141f623511'
+$script:ExpectedIntegrityHash = '4702249c131a831e2d30cf59784d9b77706de2ff810a277e3b3963f6db36d8e5'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -1477,10 +1477,10 @@ function Test-ControlConfigured {
     $all = $true
     foreach ($value in (ConvertTo-Array $Control.LocalValues)) {
         $current = Get-RegValue -Path $value.Path -Name $value.Name
-        if ($null -eq $current) { $all = $false; break }
+        if ($null -eq $current -or (Get-RegKind -Path $value.Path -Name $value.Name) -ne $value.Type) { $all = $false; break }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
-        if ($comparison -eq 'AtLeast') { if ([int]$current -lt [int]$value.Value) { $all = $false; break } }
-        else { if ([int]$current -ne [int]$value.Value) { $all = $false; break } }
+        if ($comparison -eq 'AtLeast') { if ([long]$current -lt [long]$value.Value) { $all = $false; break } }
+        else { if ([long]$current -ne [long]$value.Value) { $all = $false; break } }
     }
     return $all
 }
@@ -2259,10 +2259,11 @@ function Get-ControlDelta {
         $exists = Test-RegValue -Path $value.Path -Name $value.Name
         $current = if ($exists) { Get-RegValue -Path $value.Path -Name $value.Name } else { $null }
         $comparison = if ($value.ContainsKey('Comparison')) { $value.Comparison } else { 'Exact' }
+        $currentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
 
-        $needs = if (-not $exists) { $true }
-                 elseif ($comparison -eq 'AtLeast') { [int]$current -lt [int]$value.Value }
-                 else { [int]$current -ne [int]$value.Value }
+        $needs = if (-not $exists -or $currentType -ne $value.Type) { $true }
+                 elseif ($comparison -eq 'AtLeast') { [long]$current -lt [long]$value.Value }
+                 else { [long]$current -ne [long]$value.Value }
 
         $rows += [pscustomobject]@{
             ControlId = $control.Id
@@ -2273,7 +2274,7 @@ function Get-ControlDelta {
             Comparison = $comparison
             CurrentValue = $current
             CurrentExists = $exists
-            CurrentType = if ($exists) { Get-RegKind -Path $value.Path -Name $value.Name } else { $null }
+            CurrentType = $currentType
             DesiredValue = $value.Value
             NeedsChange = [bool]$needs
             Note = $value.Note
@@ -2298,13 +2299,14 @@ function Get-ChangePlan {
             $status = Get-ControlStatus -Id $control.Id -State $State
             $preflight = $null
             $deltas = @(Get-ControlDelta -Id $control.Id)
-            if ($status.Supported -and -not $status.ManagedByPolicy -and @($deltas | Where-Object { $_.NeedsChange }).Count -gt 0) {
+            if ($status.Supported -and -not $status.ManagedByPolicy -and @($deltas | Where-Object { $_.NeedsChange }).Count -gt 0 -and @($deltas | Where-Object { $_.CurrentExists -and $_.CurrentType -ne $_.Type }).Count -eq 0) {
                 $preflight = Get-ControlPreflight -Control $control
             }
             $requiresOverride = [bool]($preflight -and $preflight.Tripped -and $preflight.BlocksSafeSet)
             $explicit = [bool]($ExplicitIds -contains $control.Id)
             $skip = if ($status.ManagedByPolicy) { 'Managed by Group Policy' }
                     elseif (-not $status.Supported) { $status.SupportReason }
+                    elseif (@($deltas | Where-Object { $_.CurrentExists -and $_.CurrentType -ne $_.Type }).Count -gt 0) { 'An existing registry value has an unexpected type. Review it manually before remediation.' }
                     elseif ($requiresOverride) {
                         if ($explicit -and -not $script:Unattended) { $preflight.Message + ' A typed override is required.' }
                         else { $preflight.Message + ' Skipped for safety; use the interactive specific-control menu to confirm an override.' }
@@ -2328,6 +2330,7 @@ function Get-ChangePlan {
                     ExplicitlyRequested = $explicit
                     Preflight = $preflight
                     RequiresOverride = $requiresOverride
+                    DependencyReady = [bool]($status.Supported -and $status.Running -and (-not $status.ManagedByPolicy -or $status.PolicyValue -ne 0))
                     SkipReason = $skip
                 }
             }
@@ -2337,7 +2340,7 @@ function Get-ChangePlan {
     foreach ($row in $plan) {
         if ($row.SkipReason) { continue }
         foreach ($dep in (ConvertTo-Array (Get-Control -Id $row.ControlId).Requires)) {
-            $blockedDep = @($plan | Where-Object { $_.ControlId -eq $dep -and $_.SkipReason })
+            $blockedDep = @($plan | Where-Object { $_.ControlId -eq $dep -and $_.SkipReason -and -not $_.DependencyReady })
             if ($blockedDep.Count -gt 0) {
                 $row.SkipReason = ('Required control {0} is blocked: {1}' -f $dep, $blockedDep[0].SkipReason)
                 break
@@ -2546,7 +2549,7 @@ function Invoke-ControlApply {
             if ($row.SkipReason -notlike 'Required control *') { continue }
             $blockedDeps = @((Get-Control -Id $row.ControlId).Requires | Where-Object {
                 $depId = $_
-                @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason }).Count -gt 0
+                @($plan | Where-Object { $_.ControlId -eq $depId -and $_.SkipReason -and -not $_.DependencyReady }).Count -gt 0
             })
             if ($blockedDeps.Count -eq 0) { $row.SkipReason = $null }
         }
@@ -2666,6 +2669,7 @@ function Invoke-ControlRevert {
             $beforeType = Get-PropertySafe $entry 'BeforeType' $entry.Type
             $matchesBefore = [bool]($exists -eq $entry.BeforeExists -and (-not $exists -or ($current -eq $entry.BeforeValue -and $kind -eq $beforeType)))
             if ($change.RevertStarted -and $matchesBefore) {
+                if ($Rmm -and $WhatIfPreference) { continue }
                 if ($PSCmdlet.ShouldProcess($target, 'Record recovery of an interrupted revert')) {
                     Write-JournalMarker -RunId $RunId -RecordType 'Reverted' -ChangeId $change.Id
                     $recovered++
@@ -2680,6 +2684,7 @@ function Invoke-ControlRevert {
                 continue
             }
             $action = if ($entry.BeforeExists) { 'Restore to {0}' -f $entry.BeforeValue } else { 'Remove value (did not exist before)' }
+            if ($Rmm -and $WhatIfPreference) { continue }
             if (-not $PSCmdlet.ShouldProcess($target, $action)) { continue }
             Write-JournalMarker -RunId $RunId -RecordType 'RevertStarted' -ChangeId $change.Id
             if ($entry.BeforeExists) { & $script:Registry.SetValue $entry.Path $entry.Name $beforeType $entry.BeforeValue }
@@ -3701,6 +3706,7 @@ function Write-RmmOutput {
         warnings = @($script:Warnings).Count
         exitCode = $script:ExitCode
     }
+    $script:RmmOutputWritten = $true
     Write-Output ($payload | ConvertTo-Json -Depth 8 -Compress)
 }
 
@@ -4084,12 +4090,27 @@ function Get-FinalExitCode {
     return 0
 }
 
-# Invoke-Main sets $script:ExitCode itself. Its output is NOT captured, so RMM mode
-# can emit its JSON object on stdout for a pipeline to consume.
-try { Invoke-Main }
-catch {
-    $script:ExitCode = 1
-    if ($Rmm) { Write-Output (([pscustomobject]@{ tool = $script:ToolName; exitCode = 1; error = $_.Exception.Message }) | ConvertTo-Json -Compress) }
-    else { Write-Line ('WinDSH failed: {0}' -f $_.Exception.Message) 'Bad' }
+function Invoke-EntryPoint {
+    $script:RmmOutputWritten = $false
+    $failureMessage = $null
+    try { Invoke-Main }
+    catch {
+        $script:ExitCode = 1
+        $failureMessage = $_.Exception.Message
+        if (-not $Rmm) { Write-Line ('WinDSH failed: {0}' -f $failureMessage) 'Bad' }
+    }
+    # Validation/elevation failures return before assessment. Automation still gets
+    # one JSON result rather than a silent exit or mixed diagnostic output.
+    if ($Rmm -and -not $script:RmmOutputWritten -and -not ($Version -or $ListControls -or $SelfTest)) {
+        if (-not $failureMessage) { $failureMessage = Get-ExitCodeMeaning -Code $script:ExitCode }
+        Write-Output (([pscustomobject]@{
+            schemaVersion = $script:SchemaVersion; tool = $script:ToolName
+            version = $script:ToolVersion; exitCode = $script:ExitCode
+            restartRequired = $script:RestartRequired; error = $failureMessage
+        }) | ConvertTo-Json -Compress)
+    }
 }
+
+# Invoke-Main sets its exit code; do not capture stdout in the entry point.
+Invoke-EntryPoint
 exit $script:ExitCode
