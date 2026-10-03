@@ -1,6 +1,6 @@
 # WinDSH changelog
 
-## v2.0.0 — Unreleased
+## v2.0.0 — 2026-10-03
 
 Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new internals.
 
@@ -9,6 +9,8 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 - Add `WinDSH.zip` to release assets, containing only `Run-WinDSH-AsAdmin.bat` and
   `WinDSH.ps1`, with SHA-256 checksums and build provenance. Document extraction
   and launch steps in the public download section.
+- Allow maintainers to build a verified draft release and version tag from the
+  GitHub website without manually uploading release assets.
 
 - **Security score out of 100** with a grade, weighted across the controls this machine
   can actually run. Controls the hardware cannot support are excluded from the total

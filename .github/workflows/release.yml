@@ -1,24 +1,33 @@
 name: WinDSH Release
 
-# Releases are produced ONLY by this workflow, from a tag on this repository.
+# Releases are produced ONLY by this workflow, from this repository's source.
 # SignPath Foundation requires that signed artifacts are built by a trusted build
 # system from the project's own source. Never hand-upload a release asset.
 #
 # To cut a release:
 #   1. Make sure main is green and the version in WinDSH.ps1 is correct.
-#   2. Follow docs/RELEASING.md to tag the version declared by the built script.
+#   2. Push the version tag, or request a draft from main with Run workflow.
 #   3. Review and publish the workflow-created draft release.
 
 on:
   push:
     tags: ['v*']
-  # Manual dispatch verifies/stages artifacts; only tag pushes publish.
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create the version tag and a draft release from main'
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: write       # create the GitHub Release
   id-token: write       # OIDC token for build provenance
   attestations: write   # write the provenance attestation
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -54,6 +63,21 @@ jobs:
 
           "version=$scriptVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag"              | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Validate manual release request
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+              throw 'Create a draft release only from main after its CI checks pass.'
+          }
+          $existingTag = git ls-remote --tags origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not check existing release tags.' }
+          if ($existingTag) {
+              throw "Tag $env:RELEASE_TAG already exists. Review its release; never replace a public tag or its assets."
+          }
 
       - name: Verify the build is current
         shell: powershell
@@ -176,8 +200,23 @@ jobs:
           path: dist/
           retention-days: 30
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create release tag
+        if: github.event_name == 'workflow_dispatch' && inputs.create_release
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # GITHUB_TOKEN tag pushes do not start another workflow run. This run
+          # has already verified, tested, packaged, and attested the exact commit.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a $env:RELEASE_TAG $env:GITHUB_SHA -m "WinDSH $env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create the release tag.' }
+          git push origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not push the release tag.' }
+
+      - name: Create draft GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.create_release)
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: WinDSH ${{ steps.version.outputs.tag }}

@@ -23,6 +23,15 @@
 
 ## Create the tag
 
+To release from GitHub's website, open **Actions > WinDSH Release > Run workflow**,
+select **main**, enable **Create the version tag and a draft release from main**,
+and run the workflow. It refuses an existing version tag, verifies and tests the
+checked-out commit, builds and attests the assets, then creates the version tag
+and draft release. The workflow's tag push does not start a second workflow run.
+Leaving this option disabled only stages artifacts for review.
+
+Alternatively, push the tag from a local checkout:
+
 From an up-to-date, clean checkout of `main`, derive the tag from the built script:
 
 ```powershell
@@ -42,8 +51,9 @@ Do not move an existing public tag to another commit.
 
 The [release workflow](https://github.com/OJXW65A/WinDSH/blob/main/.github/workflows/release.yml) verifies the build,
 checks the tag/version match, runs Pester, packages files, creates SHA-256 checksums,
-and attests the ZIPs and checksum file. A tag push opens a **draft** GitHub Release;
-manual workflow dispatch stages build artifacts without publishing a release.
+and attests the ZIPs and checksum file. A tag push or an explicit manual release
+request from `main` opens a **draft** GitHub Release. Neither route publishes it
+automatically; review the built assets before publication.
 
 | Asset | Contents |
 |---|---|
