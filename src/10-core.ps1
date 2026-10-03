@@ -144,7 +144,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
-$script:ToolVersion     = '2.0.0'
+$script:ToolVersion     = '2.0.1'
 $script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 

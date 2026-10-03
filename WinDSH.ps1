@@ -144,12 +144,12 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
-$script:ToolVersion     = '2.0.0'
+$script:ToolVersion     = '2.0.1'
 $script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = 'cef2749987316b58ab1bae2336f8dec78755e56d8634effaa0c372a4d593d5d2'
+$script:ExpectedIntegrityHash = '0af323de719a1940239daf820708a4beaea216cad35577ce36f0b64d64438be3'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()

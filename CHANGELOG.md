@@ -1,5 +1,35 @@
 # WinDSH changelog
 
+## v2.0.1 — Unreleased
+
+### Fixed
+
+- Keep unavailable runtime and registry evidence unknown; avoid false active
+  results, scores, and Secured-core qualification. Distinguish shadow-stack audit
+  mode from enforcement.
+- Preserve existing VBS/Memory Integrity locks and locked Credential Guard.
+  Accept only documented platform-security values instead of a numeric minimum.
+- Block affected changes on registry or policy read errors and unexpected values.
+- Normalize comma-separated control IDs before elevation. Disable changes whenever
+  the generated script's integrity cannot be verified, including malformed metadata.
+- Record rollback writes in reports and RMM change counts. Preserve earlier reports
+  when multiple saves occur within one second; use locale-independent SVG numbers.
+- Check the administrator token instead of the Server service in the launcher;
+  wait for elevated completion and return the application's exit code.
+- Refresh boot and hardware facts on an explicit interactive re-check.
+- Refuse release reruns that could replace published assets or mix files into an
+  existing draft. Fail closed when the authenticated release check is unavailable.
+
+### Changed
+
+- Share each OS, computer-system, and processor CIM query across collectors,
+  reducing those queries from six to three per full assessment.
+- Document JSON/RMM schema 2.1, unknown evidence, and separate apply/rollback counts.
+- Add regressions for the audited failures and Windows launcher process handling.
+
+Physical Windows remediation, UAC, driver, policy, and firmware checks remain part
+of the release validation process. This source version has not been published.
+
 ## v2.0.0 — 2026-10-03
 
 Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new internals.
