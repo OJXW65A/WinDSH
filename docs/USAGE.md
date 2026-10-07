@@ -110,14 +110,14 @@ See [JSON and RMM schema 2.1](REPORT_SCHEMA.md) before updating automation consu
 
 ## Score and CIS interpretation
 
-The **applicable protection score** is weighted across scored controls whose platform
-requirements are met. Unsupported controls are excluded; reports show how many scored
-controls are applicable. A score of 100 on limited hardware is not equivalent to
+The **applicable protection score** is weighted across controls with known support
+or unverified prerequisites. Only confirmed unsupported controls are excluded;
+reports show how many controls remain in scoring. A score of 100 on limited hardware is not equivalent to
 Secured-core qualification, and is not an overall measure of endpoint security.
 Detection-only controls have zero scoring weight.
 
-`Unknown` means the required evidence could not be verified. Scored unknown controls
-stay in the denominator, earn no points, and produce an **Incomplete assessment**
+`Unknown` means required platform, runtime, or configuration evidence could not be
+verified. Scored unknown controls stay in the denominator, earn no points, and produce an **Incomplete assessment**
 grade. Shadow-stack `AuditMode` earns no enforcement points. Configuration-only
 controls describe registry requirements; they do not independently prove runtime
 enforcement. Missing policy evidence produces unknown CIS results rather than a

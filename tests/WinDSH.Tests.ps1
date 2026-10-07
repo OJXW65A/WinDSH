@@ -164,7 +164,7 @@ Describe 'Self-test coverage markers' {
     It 'covers apply and revert round-trip' { $SelfTest | Should -Match 'Revert restores every journalled value' }
     It 'covers Group Policy being left alone' { $SelfTest | Should -Match 'policy-managed' }
     It 'covers the platform security downgrade guard' { $SelfTest | Should -Match 'stronger Secure Boot' }
-    It 'covers the ambiguous firmware string' { $SelfTest | Should -Match 'confirmed UEFI' }
+    It 'covers the ambiguous firmware string' { $SelfTest | Should -Match 'Ambiguous firmware text remains unknown' }
     It 'covers hypervisorlaunchtype Off' { $SelfTest | Should -Match 'hypervisorlaunchtype' }
     It 'covers CIS comparison' { $SelfTest | Should -Match 'CIS' }
     It 'covers HTML report escaping' { $SelfTest | Should -Match 'inject markup' }

@@ -9,7 +9,7 @@ function Show-Summary {
     Write-Section 'Applicable protection score'
     $kind = if ($Score.UnknownCount -gt 0) { 'Warn' } elseif ($Score.Score -ge 75) { 'Good' } elseif ($Score.Score -ge 50) { 'Warn' } else { 'Bad' }
     Write-Line ('{0} / 100  ({1})' -f $Score.Score, $Score.Grade) $kind
-    Write-Line ('{0} of {1} scored controls are applicable; unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
+    Write-Line ('{0} of {1} controls are included in scoring; confirmed unsupported controls are excluded.' -f $Score.ApplicableCount, $Score.TotalCount) 'Dim'
     $running = @($Statuses | Where-Object { $_.State -eq 'Running' }).Count
     $countable = @($Statuses | Where-Object { $_.State -ne 'NotSupported' }).Count
     Write-Line ('{0} of {1} applicable protections are active.' -f $running, $countable) 'Plain'
@@ -50,7 +50,7 @@ function Show-Summary {
         Write-Line ('Secure Boot : {0}' -f (Format-Bool $State.Firmware.SecureBootEnabled 'Enabled' 'Disabled' 'Unavailable')) 'Dim'
         Write-Line ('TPM         : {0} (spec {1})' -f (Format-Bool $State.Tpm.IsTPM2 'TPM 2.0' 'not confirmed'), $State.Tpm.SpecVersion) 'Dim'
         Write-Line ('Hypervisor  : launch type {0} via {1}' -f $State.HypervisorLaunch.LaunchType, $State.HypervisorLaunch.Source) 'Dim'
-        Write-Line ('Secured-core: {0}' -f (Format-Bool $SecuredCore.Qualifies 'qualifies' ('does not qualify ({0} unmet)' -f $SecuredCore.UnmetCount))) 'Dim'
+        Write-Line ('Secured-core: {0}' -f (Format-Bool $SecuredCore.Qualifies 'qualifies' ('not confirmed ({0} unmet or unverified)' -f $SecuredCore.UnmetCount))) 'Dim'
     }
 }
 
@@ -203,9 +203,10 @@ function Write-RmmOutput {
         firmwareMode = $State.Firmware.Mode
         secureBoot = $State.Firmware.SecureBootEnabled
         tpm2 = $State.Tpm.IsTPM2
+        tpm2Known = [bool](Get-PropertySafe $State.Tpm 'IsTPM2Known' $true)
         cisCompliant = $Cis.CompliantCount
         cisTotal = $Cis.TotalCount
-        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy; policyKnown = (-not [bool]$_.PolicyReadError); runningKnown = $_.RunningKnown } })
+        controls = @($Statuses | ForEach-Object { [pscustomobject]@{ id = $_.Id; state = $_.State; policy = $_.ManagedByPolicy; policyKnown = (-not [bool]$_.PolicyReadError); runningKnown = $_.RunningKnown; supportKnown = $_.SupportKnown } })
         changes = @($script:AppliedChanges).Count + @($script:RevertedChanges).Count
         appliedChangeCount = @($script:AppliedChanges).Count
         revertedChangeCount = @($script:RevertedChanges).Count

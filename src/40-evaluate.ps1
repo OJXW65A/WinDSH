@@ -101,52 +101,65 @@ function Get-ControlPolicyOverride {
 
 function Get-ControlSupport {
     <#
-        Hard prerequisites the machine itself imposes. Returns the FIRST blocking reason so
-        the user is given one thing to act on rather than a checklist.
+        Hard prerequisites the machine itself imposes. Only a confirmed failure is
+        unsupported; missing evidence blocks changes without excluding scoring weight.
     #>
     param([Parameter(Mandatory = $true)]$Control, [Parameter(Mandatory = $true)]$State)
 
     $requirements = @(ConvertTo-Array $Control.PlatformRequirements)
+    $unknownReasons = @()
     foreach ($requirement in $requirements) {
         switch ($requirement) {
             '64Bit' {
-                if (-not $State.Computer.Is64Bit) { return [pscustomobject]@{ Supported = $false; Reason = 'This protection requires a 64-bit version of Windows.'; Fix = $null } }
+                if (-not $State.Computer.Is64Bit) { return [pscustomobject]@{ Supported = $false; Known = $true; Reason = 'This protection requires a 64-bit version of Windows.'; Fix = $null } }
             }
             'Hypervisor' {
                 if ($State.HypervisorLaunch.BlocksVbs) {
-                    return [pscustomobject]@{ Supported = $false; Reason = 'The Windows hypervisor is switched off in the boot configuration, so this protection cannot start.'; Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.' }
+                    return [pscustomobject]@{ Supported = $false; Known = $true; Reason = 'The Windows hypervisor is switched off in the boot configuration, so this protection cannot start.'; Fix = 'In an elevated Command Prompt run:  bcdedit /set hypervisorlaunchtype Auto   then restart.' }
                 }
+                if (-not $State.HypervisorLaunch.LaunchType -or $State.HypervisorLaunch.Error) { $unknownReasons += 'Windows hypervisor boot configuration' }
             }
             'Uefi' {
                 if (-not $State.Firmware.IsUefiConfirmed) {
-                    return [pscustomobject]@{ Supported = $false; Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode); Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.' }
+                    if ($State.Firmware.IsLegacyConfirmed) {
+                        return [pscustomobject]@{ Supported = $false; Known = $true; Reason = ('Requires UEFI firmware mode; this PC reports {0}.' -f $State.Firmware.Mode); Fix = 'Switching from Legacy/CSM to UEFI also requires converting the disk from MBR to GPT. Back up first.' }
+                    }
+                    $unknownReasons += 'UEFI firmware mode'
                 }
             }
             'Virtualization' {
-                if (-not $State.Virtualization.FirmwareEnabled) {
-                    return [pscustomobject]@{ Supported = $false; Reason = 'CPU virtualization is turned off in firmware.'; Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.' }
+                if (-not (Get-PropertySafe $State.Virtualization 'FirmwareKnown' $true)) { $unknownReasons += 'CPU virtualization' }
+                elseif (-not $State.Virtualization.FirmwareEnabled) {
+                    return [pscustomobject]@{ Supported = $false; Known = $true; Reason = 'CPU virtualization is turned off in firmware.'; Fix = 'Enable Intel VT-x / AMD SVM in BIOS setup. Use -Explain or the firmware guide for where to find it.' }
                 }
             }
             'Tpm2' {
-                if (-not $State.Tpm.IsTPM2) {
-                    return [pscustomobject]@{ Supported = $false; Reason = 'TPM 2.0 was not confirmed, and this protection needs it to store boot measurements.'; Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.' }
+                if (-not (Get-PropertySafe $State.Tpm 'IsTPM2Known' $true)) { $unknownReasons += 'TPM version or presence' }
+                elseif (-not $State.Tpm.IsTPM2) {
+                    return [pscustomobject]@{ Supported = $false; Known = $true; Reason = 'TPM 2.0 was not confirmed, and this protection needs it to store boot measurements.'; Fix = 'Enable TPM (Intel PTT / AMD fTPM) in BIOS setup.' }
                 }
             }
             'CredentialGuardEdition' {
                 $edition = [string]$State.Computer.EditionId
+                if ([string]::IsNullOrWhiteSpace($edition)) { $unknownReasons += 'Windows edition' }
                 if ($edition -match '^(Core|CoreN|CoreSingleLanguage|CoreCountrySpecific|Home)') {
-                    return [pscustomobject]@{ Supported = $false; Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition); Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.' }
+                    return [pscustomobject]@{ Supported = $false; Known = $true; Reason = ('Credential Guard is not available on Windows {0} editions.' -f $edition); Fix = 'Requires Windows Enterprise, Education, or Pro with a supported licence.' }
                 }
             }
             default { throw ('Unknown platform requirement {0} in control {1}.' -f $requirement, $Control.Id) }
         }
     }
     $minBuild = Get-PropertySafe $Control 'MinimumBuild' $null
-    if ($null -ne $minBuild -and $State.Computer.BuildNumber -gt 0 -and $State.Computer.BuildNumber -lt [int]$minBuild) {
-        return [pscustomobject]@{ Supported = $false; Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber); Fix = 'Update Windows to a newer feature release.' }
+    if ($null -ne $minBuild) {
+        if ($State.Computer.BuildNumber -le 0) { $unknownReasons += 'Windows build number' }
+        elseif ($State.Computer.BuildNumber -lt [int]$minBuild) {
+            return [pscustomobject]@{ Supported = $false; Known = $true; Reason = ('Requires Windows build {0} or newer; this PC is build {1}.' -f $minBuild, $State.Computer.BuildNumber); Fix = 'Update Windows to a newer feature release.' }
+        }
     }
-
-    return [pscustomobject]@{ Supported = $true; Reason = $null; Fix = $null }
+    if ($unknownReasons.Count) {
+        return [pscustomobject]@{ Supported = $false; Known = $false; Reason = ('Cannot verify required platform prerequisites: {0}.' -f ($unknownReasons -join ', ')); Fix = 'Restore access to the Windows hardware and boot providers, then run the audit again before changing settings.' }
+    }
+    return [pscustomobject]@{ Supported = $true; Known = $true; Reason = $null; Fix = $null }
 }
 
 function Get-ControlPreflight {
@@ -200,7 +213,8 @@ function Get-ControlStatus {
     # NOT named $state: PowerShell variable names are case-insensitive, so a local
     # $state would shadow the $State parameter and the recursive dependency call below
     # would receive this string instead of the system state object.
-    $controlState = if (-not $support.Supported) { 'NotSupported' }
+    $controlState = if (-not $support.Known) { 'Unknown' }
+                    elseif (-not $support.Supported) { 'NotSupported' }
                     elseif ($auditMode) { 'AuditMode' }
                     elseif (-not $runningKnown -or (-not $running -and $configuration.Error)) { 'Unknown' }
                     elseif ($running) { 'Running' }
@@ -228,6 +242,7 @@ function Get-ControlStatus {
         Configured = $configured
         ConfigurationError = $configuration.Error
         Supported = $support.Supported
+        SupportKnown = $support.Known
         SupportReason = $support.Reason
         SupportFix = $support.Fix
         ManagedByPolicy = [bool]($null -ne $policy)
@@ -298,7 +313,7 @@ function Get-SecurityScore {
         Possible = [math]::Round($possible, 1)
         ExcludedCount = @($breakdown | Where-Object { -not $_.Counted }).Count
         Breakdown = $breakdown
-        ApplicableCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.Supported }).Count
+        ApplicableCount = @($Statuses | Where-Object { $_.Weight -gt 0 -and $_.State -ne 'NotSupported' }).Count
         TotalCount = @($Statuses | Where-Object { $_.Weight -gt 0 }).Count
     }
 }
@@ -365,7 +380,8 @@ function Get-CisComplianceReport {
             Actual = $policyValue
             Compliant = $compliant
             PolicyKnown = $policyKnown
-            FeatureRunning = [bool]($status -and $status.State -eq 'Running')
+            FeatureRunning = [bool]($status -and $status.Running)
+            FeatureRunningKnown = [bool]($status -and $status.RunningKnown)
             Divergence = Get-PropertySafe $control.Cis 'Divergence' $null
         }
     }
@@ -401,6 +417,11 @@ function Get-ControlExplanation {
         $action = 'Review the registry or policy read error and restore access before remediation. WinDSH will skip this protection.'
         $severity = 'Warn'
     }
+    elseif (-not $status.SupportKnown) {
+        $verdict = $status.SupportReason
+        $action = $status.SupportFix
+        $severity = 'Warn'
+    }
     elseif ($status.State -eq 'Unknown') {
         $verdict = ('Windows did not provide the running state of {0}.' -f $control.Name)
         $action = 'Check access to the Windows security providers, then re-run the audit. Registry configuration alone does not prove this protection is active.'
@@ -432,13 +453,13 @@ function Get-ControlExplanation {
     }
     elseif ($status.State -eq 'ConfiguredNotRunning') {
         if ($State.Restart.Pending -or $script:RestartRequired) {
-            $verdict = ('{0} is configured but Windows has not restarted since the change.' -f $control.Name)
+            $verdict = ('{0} is configured but not active, and a restart is pending.' -f $control.Name)
             $action = 'Restart Windows, then run the audit again.'
             $severity = 'Warn'
         }
         else {
-            $verdict = ('{0} is configured, Windows has restarted, and it still is not running. Everything Windows can check is satisfied, so the remaining explanation is hardware or firmware capability.' -f $control.Name)
-            $action = Get-HardwareCapabilityAdvice -Control $control -State $State
+            $verdict = ('{0} is configured but Windows does not report it active.' -f $control.Name)
+            $action = 'Restart if this setting changed recently, then run the audit again. If it remains inactive, review driver compatibility, organization policy, and platform requirements.' + "`n`n" + (Get-HardwareCapabilityAdvice -Control $control -State $State)
             $severity = 'Info'
         }
     }
@@ -532,7 +553,7 @@ function Get-HardwareCapabilityAdvice {
             ) -join "`n"
         }
         default {
-            return 'Everything Windows can verify is in order. The remaining explanation is that this hardware or firmware does not provide the capability.'
+            return 'Check Windows security diagnostics and your manufacturer''s documentation for any additional hardware or firmware requirements.'
         }
     }
 }
@@ -541,7 +562,7 @@ function Get-Assessment {
     param([Parameter(Mandatory = $true)]$State)
     $statuses = @(Get-AllControlStatus -State $State)
     $unknown = @($statuses | Where-Object State -eq 'Unknown')
-    if ($unknown.Count) { Add-Warning ('Running or configuration evidence is unavailable for {0} protection(s); the assessment is incomplete.' -f $unknown.Count) }
+    if ($unknown.Count) { Add-Warning ('Platform, running, or configuration evidence is unavailable for {0} protection(s); the assessment is incomplete.' -f $unknown.Count) }
     foreach ($status in $statuses) {
         if ($status.PolicyReadError) { Add-Warning ('Cannot read policy for {0}: {1}' -f $status.Id, $status.PolicyReadError) }
         if ($status.ConfigurationError) { Add-Warning ('Cannot verify configuration for {0}: {1}' -f $status.Id, $status.ConfigurationError) }
