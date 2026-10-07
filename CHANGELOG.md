@@ -1,6 +1,6 @@
 # WinDSH changelog
 
-## v2.0.1 — Unreleased
+## v2.0.1 — 2026-10-07
 
 ### Fixed
 
@@ -38,8 +38,16 @@
 - Ignore the default debug log and clarify draft-release naming, ZIP verification,
   and the requirement to keep published tags unchanged.
 
-Physical Windows remediation, UAC, driver, policy, and firmware checks remain part
-of the release validation process. This source version has not been published.
+### Validation
+
+All five Windows CI jobs passed. Windows PowerShell 5.1 and PowerShell 7 each
+passed 134 tests with no failures or skips. Live Windows audit/report, RMM, and
+no-write preview smoke checks passed.
+
+Physical Windows remediation and rollback, UAC, driver compatibility, organization
+execution policies, and firmware restart checks have not been completed for this
+release. Validate these paths on representative systems before deployment. CI on a
+hosted Windows VM does not establish physical hardware compatibility.
 
 ## v2.0.0 — 2026-10-03
 
