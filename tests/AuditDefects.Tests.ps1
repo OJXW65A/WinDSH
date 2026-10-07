@@ -1,6 +1,7 @@
 # Edge cases found in the v2 audit. Registry writes use only the in-memory provider.
 BeforeAll {
     $RepoRoot = Split-Path -Parent $PSScriptRoot
+    . (Join-Path $PSScriptRoot 'TestSupport.ps1')
     foreach ($module in (Get-ChildItem (Join-Path $RepoRoot 'src') -Filter *.ps1 | Sort-Object Name)) {
         if ($module.Name -eq '70-main.ps1') {
             $body = (Get-Content -Raw $module.FullName) -split '# Invoke-Main sets', 2
@@ -419,7 +420,7 @@ Describe 'Self-integrity metadata validation' {
         $tokens = $null; $parseErrors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $RepoRoot 'src/10-core.ps1'), [ref]$tokens, [ref]$parseErrors)
         $integrityFunction = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-SelfIntegrity' }, $true).Extent.Text
-        $PowerShellExe = (Get-Process -Id $PID).Path
+        $PowerShellExe = Get-TestPowerShellPath
     }
     It 'validates a complete marker and rejects <Mutation>' -TestCases @(
         @{ Mutation = 'none'; Expected = 'OK' }

@@ -3,7 +3,8 @@ BeforeAll {
     $RepoRoot = Split-Path -Parent $PSScriptRoot
     $LauncherPath = Join-Path $RepoRoot 'Run-WinDSH-AsAdmin.bat'
     $Launcher = Get-Content -Raw -LiteralPath $LauncherPath
-    $PowerShellExe = (Get-Process -Id $PID).Path
+    . (Join-Path $PSScriptRoot 'TestSupport.ps1')
+    $PowerShellExe = Get-TestPowerShellPath
 
     function Invoke-LauncherTestProcess {
         param([string]$FileName, [string]$Arguments)

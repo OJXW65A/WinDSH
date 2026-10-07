@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   release:
-    name: Build and publish
+    name: Build and draft release
     runs-on: windows-latest
 
     steps:
@@ -55,7 +55,7 @@ jobs:
 
               if ($tagVersion -ne $scriptVersion) {
                   Write-Host "::error::Tag $tag does not match the script version $scriptVersion."
-                  Write-Host '::error::Update ToolVersion (and the integrity hash) or retag.'
+                  Write-Host '::error::Correct ToolVersion, rebuild, and create a new version tag. Never move a published tag.'
                   exit 1
               }
           }
@@ -263,14 +263,14 @@ jobs:
             ### Verifying this download
 
             ```powershell
-            Get-FileHash -Algorithm SHA256 .\WinDSH.ps1
+            Get-FileHash -Algorithm SHA256 .\WinDSH.zip
             ```
 
             Compare the result with `SHA256SUMS-WinDSH-${{ steps.version.outputs.tag }}.txt`.
 
             ### Code signing status
 
-            This release is **not yet Authenticode signed**. Verify it using the SHA-256
+            This release is **unsigned**. Verify it using the SHA-256
             checksums above. There is currently no signing certificate or sponsorship.
 
             The SHA-256 self-check inside WinDSH detects accidental corruption only. It is

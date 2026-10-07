@@ -19,8 +19,8 @@ function New-SyntheticState {
             Type = 'UEFI'; Mode = 'UEFI'; IsUefiConfirmed = $true; IsLegacyConfirmed = $false
             DetectionSource = 'SelfTest'; SecureBootSupported = $true; SecureBootEnabled = $true
         }
-        Tpm = [pscustomobject]@{ Present = $true; Ready = $true; SpecVersion = '2.0'; IsTPM2 = $true }
-        Virtualization = [pscustomobject]@{ HypervisorPresent = $true; FirmwareEnabled = $true; FirmwareRaw = $true; Slat = $true }
+        Tpm = [pscustomobject]@{ Present = $true; Ready = $true; SpecVersion = '2.0'; IsTPM2 = $true; IsTPM2Known = $true }
+        Virtualization = [pscustomobject]@{ HypervisorPresent = $true; FirmwareEnabled = $true; FirmwareKnown = $true; FirmwareRaw = $true; Slat = $true }
         HypervisorLaunch = [pscustomobject]@{ LaunchType = 'NotSet'; Source = 'SelfTest'; BlocksVbs = $false; Error = $null }
         Dep = [pscustomobject]@{ SupportPolicy = 3; Available = $true; Text = 'On for all programs'; Enabled = $true }
         VirtualMachine = [pscustomobject]@{ IsVirtual = $false; Platform = $null; Notes = @() }
@@ -114,7 +114,7 @@ function Invoke-SelfTest {
         IsLegacyConfirmed = $false; DetectionSource = 'SelfTest'; SecureBootSupported = $false; SecureBootEnabled = $false
     }
     $legacyStatus = Get-ControlStatus -Id 'secure-launch' -State $legacy
-    Assert-That 'Ambiguous firmware text is not treated as confirmed UEFI' ($legacyStatus.State -eq 'NotSupported') $legacyStatus.SupportReason
+    Assert-That 'Ambiguous firmware text remains unknown' ($legacyStatus.State -eq 'Unknown' -and -not $legacyStatus.SupportKnown) $legacyStatus.SupportReason
 
     # --- plan and apply ---
     Set-RegistryProvider (New-InMemoryRegistryProvider)

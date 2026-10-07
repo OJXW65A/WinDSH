@@ -120,9 +120,12 @@ function Get-FirmwareState {
 
 function Get-TpmState {
     $present = $false; $ready = $null; $spec = $null; $isTpm2 = $false
+    $presenceKnown = $false; $isTpm2Known = $false
     try {
         $tpm = Get-Tpm -ErrorAction Stop
-        $present = [bool](Get-PropertySafe $tpm 'TpmPresent' $false)
+        $presence = Get-PropertySafe $tpm 'TpmPresent' $null
+        $presenceKnown = $null -ne $presence
+        $present = [bool]$presence
         $ready = Get-PropertySafe $tpm 'TpmReady' $null
     }
     catch { Write-DebugError 'Get-Tpm' $_ }
@@ -130,7 +133,11 @@ function Get-TpmState {
     try {
         $wmi = Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftTpm' -ClassName 'Win32_Tpm' -ErrorAction Stop
         $spec = [string](Get-PropertySafe $wmi 'SpecVersion' '')
-        if ($spec -match '^\s*2\.0') { $isTpm2 = $true; $present = $true }
+        if ($null -ne $wmi) { $present = $true; $presenceKnown = $true }
+        if ($spec -match '^\s*(1\.2|2\.0)(\s*,|\s*$)') {
+            $isTpm2Known = $true
+            $isTpm2 = $spec -match '^\s*2\.0'
+        }
     }
     catch { Write-DebugError 'Query Win32_Tpm' $_ }
 
@@ -139,6 +146,7 @@ function Get-TpmState {
         Ready = $ready
         SpecVersion = $spec
         IsTPM2 = $isTpm2
+        IsTPM2Known = [bool]($isTpm2Known -or ($presenceKnown -and -not $present))
     }
 }
 
@@ -156,6 +164,7 @@ function Get-VirtualizationState {
     return [pscustomobject]@{
         HypervisorPresent = $hypervisorPresent
         FirmwareEnabled = $enabled
+        FirmwareKnown = [bool]($hypervisorPresent -or $null -ne $vmx)
         FirmwareRaw = $vmx
         Slat = $slat
     }

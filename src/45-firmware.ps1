@@ -19,15 +19,19 @@ function Get-DriveEncryptionSummary {
         is locked out of their own data.
     #>
     $protected = @()
+    $unknown = $false
     try {
         $volumes = @(Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftVolumeEncryption' `
                         -ClassName 'Win32_EncryptableVolume' -ErrorAction Stop)
         foreach ($v in $volumes) {
-            if ([int](Get-PropertySafe $v 'ProtectionStatus' 0) -eq 1) {
+            $protectionStatus = Get-PropertySafe $v 'ProtectionStatus' $null
+            if ($null -ne $protectionStatus -and $protectionStatus -eq 1) {
                 $protected += [string](Get-PropertySafe $v 'DriveLetter' '?')
             }
+            elseif ($null -eq $protectionStatus -or $protectionStatus -ne 0) { $unknown = $true }
         }
-        return [pscustomobject]@{ Queried = $true; AnyProtected = [bool](@($protected).Count -gt 0); ProtectedDrives = $protected }
+        $anyProtected = if ($protected.Count -gt 0) { $true } elseif ($unknown) { $null } else { $false }
+        return [pscustomobject]@{ Queried = $true; AnyProtected = $anyProtected; ProtectedDrives = $protected }
     }
     catch {
         Write-DebugError 'Query BitLocker protection status' $_
@@ -133,8 +137,10 @@ function Get-FirmwareGuidance {
     $hints = Get-FirmwareVendorHints -Manufacturer $State.Computer.Manufacturer -Model $State.Computer.Model
     $encryption = Get-DriveEncryptionSummary
     $needed = @()
+    $unknown = @()
 
-    if (-not $State.Tpm.Present -or -not $State.Tpm.IsTPM2) {
+    if (-not (Get-PropertySafe $State.Tpm 'IsTPM2Known' $true)) { $unknown += 'TPM version or presence' }
+    elseif (-not $State.Tpm.IsTPM2) {
         $needed += [pscustomobject]@{
             What = 'Security processor (TPM 2.0)'
             Why = 'Stores boot measurements. Needed for Secure Launch, and used by BitLocker and Windows Hello.'
@@ -142,7 +148,8 @@ function Get-FirmwareGuidance {
             Where = $hints.TPM
         }
     }
-    if (-not $State.Virtualization.FirmwareEnabled) {
+    if (-not (Get-PropertySafe $State.Virtualization 'FirmwareKnown' $true)) { $unknown += 'CPU virtualization' }
+    elseif (-not $State.Virtualization.FirmwareEnabled) {
         $needed += [pscustomobject]@{
             What = 'CPU virtualization'
             Why = 'Required for Virtualization-based Security. Nothing VBS-related can run without it.'
@@ -150,7 +157,9 @@ function Get-FirmwareGuidance {
             Where = $hints.Virtualization
         }
     }
-    if ($State.Firmware.SecureBootSupported -and -not $State.Firmware.SecureBootEnabled) {
+    if ($State.Firmware.Mode -eq 'Unknown') { $unknown += 'Firmware mode' }
+    if ($State.Firmware.IsUefiConfirmed -and $null -eq $State.Firmware.SecureBootEnabled) { $unknown += 'Secure Boot status' }
+    elseif ($State.Firmware.SecureBootSupported -and -not $State.Firmware.SecureBootEnabled) {
         $needed += [pscustomobject]@{
             What = 'Secure Boot'
             Why = 'Verifies the boot chain. WinDSH requires it for VBS, so VBS will not start while it is off.'
@@ -172,8 +181,9 @@ function Get-FirmwareGuidance {
         EnterKey = $hints.EnterKey
         Encryption = $encryption
         Needed = $needed
+        Unknown = $unknown
         LegacyWarning = [bool]$State.Firmware.IsLegacyConfirmed
-        CanOfferReboot = [bool](@($needed).Count -gt 0)
+        CanOfferReboot = [bool]($State.Firmware.IsUefiConfirmed -and @($needed | Where-Object { $_.What -ne 'Windows hypervisor (not a firmware setting)' }).Count -gt 0)
     }
 }
 
@@ -195,26 +205,31 @@ function Show-FirmwareGuidance {
         Write-Line 'Find your key first at https://aka.ms/myrecoverykey, or suspend BitLocker before' 'Warn' 2
         Write-Line 'entering firmware.' 'Warn' 2
     }
-    elseif (-not $Guidance.Encryption.Queried) {
+    elseif (-not $Guidance.Encryption.Queried -or $null -eq $Guidance.Encryption.AnyProtected) {
         Write-Line 'BEFORE YOU CHANGE ANYTHING' 'Warn'
-        Write-Line 'Drive encryption status could not be read. If this PC uses BitLocker or Device' 'Warn' 2
+        Write-Line 'Drive encryption status could not be verified. If this PC uses BitLocker or Device' 'Warn' 2
         Write-Line 'Encryption, locate your recovery key first: https://aka.ms/myrecoverykey' 'Warn' 2
     }
     else {
-        Write-Line 'Drive encryption is not active, so TPM changes will not trigger a recovery prompt.' 'Dim'
+        Write-Line 'BitLocker protection was not reported as active. Keep any recovery key available before firmware changes.' 'Dim'
     }
 
     Write-Line ''
     Write-Line 'How to open firmware setup' 'Head'
-    Write-Line 'Easiest, works on every PC:' 'Plain' 2
+    Write-Line 'On PCs running in UEFI mode:' 'Plain' 2
     Write-Line 'Settings > System > Recovery > Advanced startup > Restart now' 'Info' 4
     Write-Line 'then Troubleshoot > Advanced options > UEFI Firmware Settings > Restart' 'Info' 4
     if ($Guidance.EnterKey) { Write-Line ('On your {0}: {1}' -f $Guidance.Vendor, $Guidance.EnterKey) 'Info' 2 }
     else { Write-Line 'Key at power on varies by manufacturer: F2, F10, F12 or Delete are the usual ones.' 'Info' 2 }
 
     Write-Line ''
+    $unknown = @(Get-PropertySafe $Guidance 'Unknown' @())
+    if ($unknown.Count) {
+        Write-Line ('Could not verify: {0}. Restore query access and run the audit again before changing these settings.' -f ($unknown -join ', ')) 'Warn'
+    }
     if (@($Guidance.Needed).Count -eq 0) {
-        Write-Line 'Nothing needs changing in firmware. Every setting WinDSH can see is already correct.' 'Good'
+        if (-not $unknown.Count -and -not $Guidance.LegacyWarning) { Write-Line 'No firmware setting changes were identified by this audit.' 'Good' }
+        else { Write-Line 'No firmware changes can be recommended from the available evidence.' 'Warn' }
     }
     else {
         Write-Line 'What to change on this PC' 'Head'

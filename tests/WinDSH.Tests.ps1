@@ -12,12 +12,8 @@ BeforeAll {
     $Source = Get-Content -Raw -LiteralPath $WinDSHPath
     $ExpectedVersion = [regex]::Match($Source, "ToolVersion\s*=\s*'([^']+)'").Groups[1].Value
 
-    if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    }
-    else {
-        $PowerShellExe = (Get-Process -Id $PID).Path
-    }
+    . (Join-Path $PSScriptRoot 'TestSupport.ps1')
+    $PowerShellExe = Get-TestPowerShellPath
 
     function Invoke-WinDSHChild {
         param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -168,7 +164,7 @@ Describe 'Self-test coverage markers' {
     It 'covers apply and revert round-trip' { $SelfTest | Should -Match 'Revert restores every journalled value' }
     It 'covers Group Policy being left alone' { $SelfTest | Should -Match 'policy-managed' }
     It 'covers the platform security downgrade guard' { $SelfTest | Should -Match 'stronger Secure Boot' }
-    It 'covers the ambiguous firmware string' { $SelfTest | Should -Match 'confirmed UEFI' }
+    It 'covers the ambiguous firmware string' { $SelfTest | Should -Match 'Ambiguous firmware text remains unknown' }
     It 'covers hypervisorlaunchtype Off' { $SelfTest | Should -Match 'hypervisorlaunchtype' }
     It 'covers CIS comparison' { $SelfTest | Should -Match 'CIS' }
     It 'covers HTML report escaping' { $SelfTest | Should -Match 'inject markup' }
