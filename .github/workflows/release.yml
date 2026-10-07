@@ -118,8 +118,8 @@ jobs:
           $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Detailed'
           $result = Invoke-Pester -Configuration $configuration
-          if ($result.FailedCount -gt 0) {
-              Write-Host '::error::Refusing to release with failing tests.'
+          if ($result.Result -ne 'Passed' -or $result.PassedCount -lt 1) {
+              Write-Host "::error::Refusing to release: Pester failed or ran no passing tests (result=$($result.Result), passed=$($result.PassedCount), failed=$($result.FailedCount))."
               exit 1
           }
 

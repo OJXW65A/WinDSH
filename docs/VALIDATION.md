@@ -7,22 +7,25 @@ Windows CI run, an in-memory test, or a synthetic sample report does not establi
 physical hardware compatibility. Record actual results; never convert a pending test
 to a pass because an automated test with a similar name passed.
 
-## v2.0.2 automated evidence
+## Published v2.0.2 evidence
 
 Evidence snapshot: **2026-10-07**, source commit
-`ab001ab6d8d155a96283c4bada8492714484fe93`.
-These results cover v2.0.2 code before the release metadata was finalized. Release
-preparation changes documentation only. For final packaging evidence, see the
+`96b29ea09e723ce836ba2090f6f07f02de4e8b74`.
+These results belong to the published v2.0.2 release, not every later development
+commit. The release build used this exact source. For development changes, use the
+corresponding PR's checks and [Actions runs](https://github.com/OJXW65A/WinDSH/actions/workflows/ci.yml).
+Packaged files and checksums are available from the
 [v2.0.2 release](https://github.com/OJXW65A/WinDSH/releases/tag/v2.0.2).
 
 | Automated check | Environment | Result | Evidence |
 |---|---|---|---|
-| Build freshness and version/changelog | Hosted Windows | Passed | [CI run](https://github.com/OJXW65A/WinDSH/actions/runs/37667168300) |
+| Build freshness and version/changelog | Hosted Windows | Passed | [CI run](https://github.com/OJXW65A/WinDSH/actions/runs/37668812629) |
 | Parsing and Pester | Windows PowerShell 5.1 | 141 passed, 0 failed, 0 skipped | Same CI run |
 | Parsing and Pester | PowerShell 7 | 141 passed, 0 failed, 0 skipped | Same CI run |
 | PSScriptAnalyzer | Both Windows runtimes | 0 errors, 0 warnings | Same CI run |
 | Live audit/report, RMM, no-write preview | Hosted Windows VM | Passed | Same CI run |
 | Workflow validation | Hosted Linux | Passed | Same CI run |
+| ZIPs, checksums, provenance | Hosted Windows release build | Passed | [Release build](https://github.com/OJXW65A/WinDSH/actions/runs/37669269181) · [Provenance](https://github.com/OJXW65A/WinDSH/attestations/53671473) |
 
 ## Published v2.0.1 evidence
 
