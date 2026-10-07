@@ -176,9 +176,11 @@ failed operations or during `-WhatIf`. Re-audit after restarting to confirm actu
 
 ## Execution policy and code signing
 
-The current batch launcher and self-elevation path use **process-scoped
+The batch launcher and self-elevation path use **process-scoped
 `-ExecutionPolicy Bypass`**. They do not change persistent execution policy or remove
-Mark of the Web. `MachinePolicy` and `UserPolicy` still take precedence. These statements describe the current launcher behavior.
+Mark of the Web. `MachinePolicy` and `UserPolicy` still take precedence; an organization
+policy that blocks the unsigned script must be respected. See Microsoft's
+[execution policy scope and precedence](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1#execution-policy-scope-and-precedence).
 
 Releases are currently **unsigned**. Compare downloads with the release's SHA-256
 checksums. The internal integrity check detects accidental corruption, not malicious

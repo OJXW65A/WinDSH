@@ -76,9 +76,9 @@ WinDSH detects organization policy and hardware limits before proposing changes.
 The Group Policy hive is read only. WinDSH does not manage encryption, clear the TPM,
 change Secure Boot keys or antivirus configuration, or download and execute code.
 
-The current launcher uses process-scoped `-ExecutionPolicy Bypass`; organization
-Group Policy still takes precedence. Releases are unsigned. Verify published files
-against the release's SHA-256 checksums. The internal integrity check detects
+The launcher and self-elevation use process-scoped `-ExecutionPolicy Bypass`;
+organization Group Policy still takes precedence. Releases are unsigned. Verify
+published files against the release's SHA-256 checksums. The internal integrity check detects
 accidental corruption and does not authenticate the publisher.
 
 Test remediation on representative Windows systems before organizational deployment.
