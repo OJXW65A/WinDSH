@@ -1,6 +1,6 @@
 # WinDSH v2 usage
 
-This guide describes the v2.0.1 source. For packaged versions, use the documentation
+This guide describes the v2.0.2 source. For packaged versions, use the documentation
 from the matching release tag.
 
 [Back to the README](../README.md)
