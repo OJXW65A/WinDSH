@@ -12,12 +12,8 @@ BeforeAll {
     $Source = Get-Content -Raw -LiteralPath $WinDSHPath
     $ExpectedVersion = [regex]::Match($Source, "ToolVersion\s*=\s*'([^']+)'").Groups[1].Value
 
-    if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        $PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    }
-    else {
-        $PowerShellExe = (Get-Process -Id $PID).Path
-    }
+    . (Join-Path $PSScriptRoot 'TestSupport.ps1')
+    $PowerShellExe = Get-TestPowerShellPath
 
     function Invoke-WinDSHChild {
         param([Parameter(Mandatory = $true)][string[]]$Arguments)

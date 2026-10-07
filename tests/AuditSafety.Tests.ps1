@@ -2,6 +2,7 @@
 # disposable-key provider test and native Windows argv test need Windows.
 BeforeAll {
     $RepoRoot = Split-Path -Parent $PSScriptRoot
+    . (Join-Path $PSScriptRoot 'TestSupport.ps1')
     foreach ($module in (Get-ChildItem (Join-Path $RepoRoot 'src') -Filter *.ps1 | Sort-Object Name)) {
         if ($module.Name -eq '70-main.ps1') {
             $body = (Get-Content -Raw $module.FullName) -split '# Invoke-Main sets', 2
@@ -9,7 +10,7 @@ BeforeAll {
         }
         else { . $module.FullName }
     }
-    $PowerShellExe = (Get-Process -Id $PID).Path
+    $PowerShellExe = Get-TestPowerShellPath
 }
 
 Describe 'Safety decisions and consistent projections' {
