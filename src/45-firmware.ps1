@@ -41,7 +41,7 @@ function Get-DriveEncryptionSummary {
     }
 }
 
-function Get-FirmwareVendorHints {
+function Get-FirmwareVendorHint {
     <#
         Maps a manufacturer to the menu locations its firmware normally uses. Layouts
         differ by model and firmware revision, so every hint is phrased as typical, and an
@@ -134,7 +134,7 @@ function Get-FirmwareGuidance {
     <# Pure: returns what needs changing and where. Takes no action. #>
     param([Parameter(Mandatory = $true)]$State)
 
-    $hints = Get-FirmwareVendorHints -Manufacturer $State.Computer.Manufacturer -Model $State.Computer.Model
+    $hints = Get-FirmwareVendorHint -Manufacturer $State.Computer.Manufacturer -Model $State.Computer.Model
     $encryption = Get-DriveEncryptionSummary
     $needed = @()
     $unknown = @()
@@ -303,11 +303,9 @@ function Open-CodeIntegrityEventViewer {
     }
 }
 
-function Show-CodeIntegrityDiagnostics {
-    param([Parameter(Mandatory = $true)]$State)
-
+function Show-CodeIntegrityDiagnostic {
     Write-Section 'Memory Integrity driver diagnostics'
-    $events = Get-CodeIntegrityEvents -EventIds @(3087) -LookbackDays 14
+    $events = Get-CodeIntegrityEvent -EventIds @(3087) -LookbackDays 14
 
     if (-not $events.Queried) {
         Write-Line 'The Code Integrity log could not be read.' 'Warn'

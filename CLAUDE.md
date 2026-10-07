@@ -137,4 +137,7 @@ representative supported Windows systems, real TPM/Secure Boot states, a blockin
 Code Integrity event 3087, organization execution policies, and restart into firmware.
 Record what was tested; do not describe all Windows paths as either untested or proven.
 
+Use [the validation matrix](docs/VALIDATION.md) to track actual results. A pending or
+blocked physical test is not a pass. Synthetic report fixtures are documentation only.
+
 See [the release process](docs/RELEASING.md) for the release and maintenance steps.

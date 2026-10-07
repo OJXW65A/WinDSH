@@ -144,7 +144,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
-$script:ToolVersion     = '2.0.1'
+$script:ToolVersion     = '2.0.2'
 $script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
@@ -174,6 +174,8 @@ function Initialize-Console {
 function Write-Line {
     # Every status carries a text marker as well as colour, so the output is readable
     # when colour is unavailable, redirected, or the reader cannot distinguish it.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Human console output stays on the host stream so RMM stdout contains only JSON.')]
     param(
         [string]$Text = '',
         [ValidateSet('Plain', 'Good', 'Warn', 'Bad', 'Info', 'Head', 'Dim')]
@@ -209,7 +211,7 @@ function Write-Line {
 function Write-Section {
     param([string]$Title)
     if ($Rmm) { return }
-    Write-Host ''
+    Write-Line ''
     Write-Line ('== {0} ==' -f $Title) 'Head'
 }
 
@@ -227,7 +229,10 @@ function Write-Debug-Log {
         $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
         [IO.File]::AppendAllText($script:DebugPath, ('[{0}] {1}{2}' -f $stamp, $Message, "`n"))
     }
-    catch { }
+    catch {
+        # Optional logging must not interrupt an audit or pollute structured stdout.
+        return
+    }
 }
 
 function Write-DebugError {
@@ -266,7 +271,7 @@ function ConvertTo-Array {
     return @($Value)
 }
 
-function Test-Contains {
+function Test-CollectionMember {
     param($Collection, $Value)
     return [bool](@(ConvertTo-Array $Collection) -contains $Value)
 }
@@ -286,6 +291,9 @@ function Format-Bool {
 # ---------------------------------------------------------------------------
 
 function New-RegistryProvider {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates a provider descriptor; its callbacks run only when explicitly invoked.')]
+    param()
     return @{
         Kind = 'Windows'
         GetValue = {
@@ -320,6 +328,8 @@ function New-RegistryProvider {
 }
 
 function New-InMemoryRegistryProvider {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates isolated test data and does not access the Windows registry.')]
     param([hashtable]$Seed)
     $store = @{}
     $kinds = @{}
@@ -360,7 +370,12 @@ function New-InMemoryRegistryProvider {
 
 $script:Registry = New-RegistryProvider
 
-function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
+function Set-RegistryProvider {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Selects the script-local provider; it does not change machine configuration.')]
+    param($Provider)
+    $script:Registry = $Provider
+}
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
 function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
@@ -458,7 +473,7 @@ function Get-RelaunchArgumentList {
         if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
         if ($key -eq 'Enable') {
-            $controlIds = @(ConvertTo-ControlIds -Ids @($value))
+            $controlIds = @(ConvertTo-ControlId -Ids @($value))
             $list += '-Enable'
             $list += ConvertTo-NativeArgument -Value ($controlIds -join ',')
             continue
@@ -479,13 +494,13 @@ function Get-RelaunchArgumentList {
     return $list
 }
 
-function ConvertTo-ControlIds {
+function ConvertTo-ControlId {
     param([string[]]$Ids)
     $normalized = @()
     foreach ($entry in (ConvertTo-Array $Ids)) {
         foreach ($part in ($entry -split ',')) {
             $controlId = $part.Trim().ToLowerInvariant()
-            if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $controlId) }
+            if (-not (Test-CollectionMember (Get-ControlId) $controlId)) { throw ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $controlId) }
             if ($normalized -notcontains $controlId) { $normalized += $controlId }
         }
     }

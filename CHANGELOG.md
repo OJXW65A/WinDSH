@@ -1,5 +1,20 @@
 # WinDSH changelog
 
+## v2.0.2 — Unreleased
+
+### Changed
+
+- Remove unused internal declarations, use singular private helper names, and
+  normalize null comparisons without changing the supported command-line options.
+- Consolidate menu output and document narrowly scoped analyzer exceptions for
+  host-stream diagnostics, data factories, and test-double signatures.
+- Enforce a zero-error/zero-warning analyzer baseline through a shared local/CI check.
+- Document hash-verified contributor dependencies using the same package pins as CI.
+- Add a clearly labeled synthetic HTML report and README preview, plus a repeatable
+  generator that does not query or modify the host.
+- Add a Windows validation matrix and manual test protocol. Outstanding physical
+  Windows checks remain explicitly pending; a sample report is not test evidence.
+
 ## v2.0.1 — 2026-10-07
 
 ### Fixed

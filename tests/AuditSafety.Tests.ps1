@@ -37,13 +37,13 @@ Describe 'Safety decisions and consistent projections' {
         Mock Test-IsElevated { $true }
         Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'OK' } }
         Mock Get-SystemState { $testState }
-        Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
+        Mock Get-CodeIntegrityEvent { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
         Mock Write-Line {}
         Mock Write-Section {}
     }
 
     It 'requires actual typed consent for an explicit interactive HVCI override' {
-        Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $true; EventCount = 1; Drivers = @(); Newest = $null; Error = $null } }
+        Mock Get-CodeIntegrityEvent { [pscustomobject]@{ Queried = $true; EventCount = 1; Drivers = @(); Newest = $null; Error = $null } }
         $script:Unattended = $false
         Mock Read-Host { 'hvci' } -ParameterFilter { $Prompt -like 'Enable * anyway?' }
         Mock Read-Host { 'yes' } -ParameterFilter { $Prompt -like 'Continue?*' }
@@ -54,7 +54,7 @@ Describe 'Safety decisions and consistent projections' {
     }
 
     It 'declining a typed override leaves HVCI unchanged' {
-        Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $true; EventCount = 1; Drivers = @(); Newest = $null; Error = $null } }
+        Mock Get-CodeIntegrityEvent { [pscustomobject]@{ Queried = $true; EventCount = 1; Drivers = @(); Newest = $null; Error = $null } }
         $script:Unattended = $false
         Mock Read-Host { 'no' } -ParameterFilter { $Prompt -like 'Enable * anyway?' }
         Mock Read-Host { 'yes' } -ParameterFilter { $Prompt -like 'Continue?*' }
@@ -64,7 +64,7 @@ Describe 'Safety decisions and consistent projections' {
     }
 
     It 'safe-set preview and execution share the failed-query safety decision' {
-        Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $false; EventCount = 0; Drivers = @(); Newest = $null; Error = 'Access denied' } }
+        Mock Get-CodeIntegrityEvent { [pscustomobject]@{ Queried = $false; EventCount = 0; Drivers = @(); Newest = $null; Error = 'Access denied' } }
         $plan = @(Get-ChangePlan -Ids $script:SafeControlSet -State $testState)
         $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $testState
         $blocked = @($plan | Where-Object ControlId -eq 'hvci')[0]
@@ -180,7 +180,7 @@ Describe 'Safety decisions and consistent projections' {
         }
         Mock Read-Host { 'yes' }
         Mock Wait-ForKey {}
-        Mock Save-Reports {
+        Mock Save-Report {
             $script:SavedAssessment = [pscustomobject]@{ Statuses = $Statuses; Cis = $Cis; Score = $Score; SecuredCore = $SecuredCore; Explanations = $Explanations }
             @()
         }

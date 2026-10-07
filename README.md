@@ -9,7 +9,7 @@ comparison with CIS Device Guard policy settings.
 
 **Contact:** windsh@rootauthority.com
 
-**Source version:** v2.0.1. The download below follows the latest published
+**Source version:** v2.0.2 (unreleased). The download below follows the latest published
 release; its packaged version is shown on the release page. Documentation for
 older releases is available from their matching tags.
 
@@ -62,6 +62,13 @@ Unavailable evidence is reported as **Unable to verify**, and shadow-stack audit
 mode is distinguished from enforcement. Neither receives active-protection credit.
 See the [control catalog and command reference](docs/USAGE.md).
 
+## Report preview
+
+![Illustrative WinDSH HTML report using synthetic data](assets/report-preview.png)
+
+Synthetic example, not a real device audit or hardware-validation result.
+[View the sample and regeneration guide](docs/SAMPLE_REPORT.md).
+
 ## Safety and signing
 
 WinDSH detects organization policy and hardware limits before proposing changes.
@@ -83,6 +90,8 @@ Re-audit after restarting to confirm that configured protections are running.
 |---|---|
 | [Usage](docs/USAGE.md) | Controls, command-line options, reports, scoring, rollback, exit codes |
 | [Report schema](docs/REPORT_SCHEMA.md) | JSON and RMM fields, status meanings, schema compatibility |
+| [Sample report](docs/SAMPLE_REPORT.md) | Labeled synthetic HTML report and preview |
+| [Windows validation](docs/VALIDATION.md) | Automated evidence, pending physical checks, manual test protocol |
 | [Contributing](CONTRIBUTING.md) | Source layout, builds, tests, contribution rules |
 | [Release process](docs/RELEASING.md) | Release validation, packaging, publication, repository maintenance |
 | [Security policy](SECURITY.md) | Supported versions and private vulnerability reporting |

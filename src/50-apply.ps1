@@ -221,7 +221,7 @@ function Get-Journal {
     return $entries
 }
 
-function Get-JournalChanges {
+function Get-JournalChange {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Records)
     $changes = @(); $seen = @{}; $index = 0
     foreach ($record in $Records) {
@@ -243,10 +243,10 @@ function Get-JournalChanges {
     return $changes
 }
 
-function Get-JournalRuns {
+function Get-JournalRun {
     $runs = @()
     foreach ($group in (Get-Journal | Group-Object RunId)) {
-        $changes = @(Get-JournalChanges -Records @($group.Group) | Where-Object { -not $_.Reverted })
+        $changes = @(Get-JournalChange -Records @($group.Group) | Where-Object { -not $_.Reverted })
         if ($changes.Count -eq 0) { continue }
         if (@($group.Group | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertCompleted' }).Count -gt 0) { continue }
         $first = @($group.Group)[0]
@@ -413,13 +413,13 @@ function Invoke-ControlRevert {
     if (-not $WhatIfPreference) { $lock = Enter-JournalLock }
     try {
         if (-not $RunId) {
-            $runs = @(Get-JournalRuns)
+            $runs = @(Get-JournalRun)
             if ($runs.Count -eq 0) { throw 'There is nothing to revert: no open change runs remain.' }
             $RunId = $runs[0].RunId
         }
         $records = @(Get-Journal -RunId $RunId)
         if (@($records | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertCompleted' }).Count -gt 0) { throw 'This run has already been reverted.' }
-        $changes = @(Get-JournalChanges -Records $records | Where-Object { -not $_.Reverted })
+        $changes = @(Get-JournalChange -Records $records | Where-Object { -not $_.Reverted })
         if ($changes.Count -eq 0) { throw ('No open changes found for run {0}.' -f $RunId) }
         # Validate every change before restoring anything, including legacy records.
         foreach ($change in $changes) { Test-JournalChange -Entry $change.Entry }

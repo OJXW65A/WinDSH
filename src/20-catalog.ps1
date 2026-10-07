@@ -348,7 +348,7 @@ function Get-Control {
     return $match[0]
 }
 
-function Get-ControlIds { return @($script:ControlCatalog | Select-Object -ExpandProperty Id) }
+function Get-ControlId { return @($script:ControlCatalog | Select-Object -ExpandProperty Id) }
 
 function Resolve-ControlOrder {
     <# Dependencies first, deduplicated, with cycle detection. #>

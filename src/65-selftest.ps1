@@ -4,6 +4,8 @@
 # ---------------------------------------------------------------------------
 
 function New-SyntheticState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates synthetic data without querying or changing the host.')]
     param([hashtable]$Override)
 
     $state = [pscustomobject]@{
@@ -42,8 +44,14 @@ function New-SyntheticState {
 function Invoke-SelfTest {
     # Scoped event provider: self-tests never query the real host's compatibility log.
     $ciEvidence = [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null }
-    function Get-CodeIntegrityEvents { param($EventIds, $LookbackDays) return $ciEvidence }
-    $pass = 0; $fail = 0
+    function Get-CodeIntegrityEvent {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'EventIds',
+            Justification = 'Test double preserves the real provider signature without querying the host.')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'LookbackDays',
+            Justification = 'Test double preserves the real provider signature without querying the host.')]
+        param($EventIds, $LookbackDays)
+        return $ciEvidence
+    }
     function Assert-That {
         param([string]$Name, [bool]$Condition, [string]$Detail = '')
         if ($Condition) { $script:stPass++; Write-Line ('{0}{1}' -f $Name, $(if ($Detail) { " - $Detail" } else { '' })) 'Good' }
@@ -58,7 +66,7 @@ function Invoke-SelfTest {
     Write-Section ('{0} {1} self-test' -f $script:ToolName, $script:ToolVersion)
 
     # --- catalog integrity ---
-    $ids = Get-ControlIds
+    $ids = Get-ControlId
     Assert-That 'Catalog ids are unique' ((@($ids | Select-Object -Unique)).Count -eq @($ids).Count) ('count={0}' -f @($ids).Count)
 
     $dangling = @()
@@ -141,7 +149,7 @@ function Invoke-SelfTest {
         $closedRejected = $false
         try { [void](Invoke-ControlRevert -RunId $applied.RunId) } catch { $closedRejected = $true }
         Assert-That 'A completed run cannot be reverted twice' $closedRejected
-        Assert-That 'Completed runs are excluded from default rollback selection' (@(Get-JournalRuns).Count -eq 0)
+        Assert-That 'Completed runs are excluded from default rollback selection' (@(Get-JournalRun).Count -eq 0)
 
         Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegCiConfig + '|VulnerableDriverBlocklistEnable') = 0 })
         $conflictApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
@@ -186,7 +194,7 @@ function Invoke-SelfTest {
 
         Set-RegistryProvider (New-InMemoryRegistryProvider)
         $crashApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
-        $crashChange = @(Get-JournalChanges -Records @(Get-Journal -RunId $crashApply.RunId))[0]
+        $crashChange = @(Get-JournalChange -Records @(Get-Journal -RunId $crashApply.RunId))[0]
         Write-JournalMarker -RunId $crashApply.RunId -RecordType 'RevertStarted' -ChangeId $crashChange.Id
         & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
         $crashRevert = Invoke-ControlRevert -RunId $crashApply.RunId
@@ -330,11 +338,11 @@ function Invoke-SelfTest {
         $safeRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
         Assert-That 'EnableAllSafe skips HVCI when 3087 evidence is present' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
         Assert-That 'Safe-set apply reports the same preflight blocker as preview' (@($safeRisk.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
-        $explicitRisk = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
+        $null = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
         Assert-That 'Explicit unattended HVCI cannot bypass a typed override' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
         $ciEvidence.EventCount = 0
         $ciEvidence.Queried = $false
-        $unknownRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        $null = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
         Assert-That 'Unknown compatibility fails closed for the safe set' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
         $depRisk = @(Get-ChangePlan -Ids @('kernel-shadow-stacks') -State $clean)
         Assert-That 'A preflight-blocked dependency also blocks shadow stacks' (@($depRisk | Where-Object { $_.ControlId -eq 'kernel-shadow-stacks' -and $_.SkipReason }).Count -eq 1)
@@ -348,13 +356,13 @@ function Invoke-SelfTest {
     }
 
     # --- firmware guidance (restored from v1.6.0) ---
-    $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
+    $hintDell = Get-FirmwareVendorHint -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
     Assert-That 'Dell firmware hints are matched' (($hintDell.Vendor -eq 'Dell') -and ($hintDell.EnterKey -match 'F2')) $hintDell.Vendor
-    $hintAcer = Get-FirmwareVendorHints -Manufacturer 'Acer' -Model 'Aspire A515'
+    $hintAcer = Get-FirmwareVendorHint -Manufacturer 'Acer' -Model 'Aspire A515'
     Assert-That 'Acer hint warns about the Supervisor Password' ($hintAcer.SecureBoot -match 'Supervisor Password')
-    $hintSurface = Get-FirmwareVendorHints -Manufacturer 'Microsoft Corporation' -Model 'Surface Laptop 5'
+    $hintSurface = Get-FirmwareVendorHint -Manufacturer 'Microsoft Corporation' -Model 'Surface Laptop 5'
     Assert-That 'Surface uses the volume-button entry method' ($hintSurface.EnterKey -match 'Volume Up')
-    $hintUnknown = Get-FirmwareVendorHints -Manufacturer 'Acme Computers' -Model 'X1'
+    $hintUnknown = Get-FirmwareVendorHint -Manufacturer 'Acme Computers' -Model 'X1'
     Assert-That 'Unknown manufacturer gets no invented menu path' (($null -eq $hintUnknown.TPM) -and ($null -eq $hintUnknown.EnterKey))
 
     $fwState = New-SyntheticState
@@ -362,7 +370,7 @@ function Invoke-SelfTest {
     $fwState.Firmware.SecureBootEnabled = $false
     $guidance = Get-FirmwareGuidance -State $fwState
     Assert-That 'Firmware guidance lists only what is actually wrong' (@($guidance.Needed).Count -eq 2) (@($guidance.Needed | Select-Object -ExpandProperty What) -join '; ')
-    Assert-That 'Firmware guidance is pure data, with no restart inside it' ($guidance.PSObject.Properties['CanOfferReboot'] -ne $null)
+    Assert-That 'Firmware guidance is pure data, with no restart inside it' ($null -ne $guidance.PSObject.Properties['CanOfferReboot'])
 
     $okState = New-SyntheticState
     Assert-That 'A correct machine needs no firmware changes' (@((Get-FirmwareGuidance -State $okState).Needed).Count -eq 0)
@@ -424,7 +432,7 @@ function Invoke-SelfTest {
     # --- HTML report ---
     $score2 = Get-SecurityScore -Statuses $cisStatuses
     $sc = Get-SecuredCoreVerdict -State $cisState -Statuses $cisStatuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $cisState })
+    $explanations = @(Get-ControlId | ForEach-Object { Get-ControlExplanation -Id $_ -State $cisState })
     $html = New-HtmlReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
     Assert-That 'HTML report is produced' ($html.Length -gt 3000) ('{0} bytes' -f $html.Length)
     Assert-That 'HTML report is self-contained' (($html -notmatch '<script') -and ($html -notmatch 'https?://[^"]*\.(css|js)')) 'no external css/js'
@@ -437,7 +445,7 @@ function Invoke-SelfTest {
     $injHtml = New-HtmlReport -State $injected -Statuses $injStatuses -Score (Get-SecurityScore -Statuses $injStatuses) `
         -SecuredCore (Get-SecuredCoreVerdict -State $injected -Statuses $injStatuses) `
         -Cis (Get-CisComplianceReport -State $injected -Statuses $injStatuses) `
-        -Explanations @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $injected })
+        -Explanations @(Get-ControlId | ForEach-Object { Get-ControlExplanation -Id $_ -State $injected })
     Assert-That 'Hostile field content cannot inject markup' (-not ($injHtml -match '<script>alert\(1\)</script>')) 'model string is escaped'
 
     $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations

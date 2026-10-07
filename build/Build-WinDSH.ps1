@@ -15,6 +15,8 @@
 .PARAMETER Check
     Verify the existing built file matches a fresh build. Used by CI.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+    Justification = 'Build diagnostics are host output, not generated script content or pipeline data.')]
 [CmdletBinding()]
 param(
     [string]$OutputPath,

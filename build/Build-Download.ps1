@@ -5,6 +5,8 @@
 .PARAMETER OutputPath
     Destination ZIP. Defaults to dist/WinDSH.zip in the repository root.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+    Justification = 'Packaging diagnostics are host output, not archive content or pipeline data.')]
 [CmdletBinding()]
 param([string]$OutputPath)
 
