@@ -151,8 +151,8 @@ jobs:
           $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Detailed'
           $result = Invoke-Pester -Configuration $configuration
-          if ($result.FailedCount -gt 0) {
-              Write-Host "::error::Pester failed: $($result.FailedCount) test(s)."
+          if ($result.Result -ne 'Passed' -or $result.PassedCount -lt 1) {
+              Write-Host "::error::Pester failed or ran no passing tests: result=$($result.Result), passed=$($result.PassedCount), failed=$($result.FailedCount)."
               exit 1
           }
           Write-Host "Pester passed: $($result.PassedCount) test(s)."
