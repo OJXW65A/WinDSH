@@ -9,7 +9,7 @@ comparison with CIS Device Guard policy settings.
 
 **Contact:** windsh@rootauthority.com
 
-**Source version:** v2.0.2 (unreleased). The download below follows the latest published
+**Source version:** v2.0.2. The download below follows the latest published
 release; its packaged version is shown on the release page. Documentation for
 older releases is available from their matching tags.
 
