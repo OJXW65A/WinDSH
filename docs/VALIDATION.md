@@ -7,6 +7,23 @@ Windows CI run, an in-memory test, or a synthetic sample report does not establi
 physical hardware compatibility. Record actual results; never convert a pending test
 to a pass because an automated test with a similar name passed.
 
+## v2.0.2 automated evidence
+
+Evidence snapshot: **2026-10-07**, source commit
+`ab001ab6d8d155a96283c4bada8492714484fe93`.
+These results cover v2.0.2 code before the release metadata was finalized. Release
+preparation changes documentation only. For final packaging evidence, see the
+[v2.0.2 release](https://github.com/OJXW65A/WinDSH/releases/tag/v2.0.2).
+
+| Automated check | Environment | Result | Evidence |
+|---|---|---|---|
+| Build freshness and version/changelog | Hosted Windows | Passed | [CI run](https://github.com/OJXW65A/WinDSH/actions/runs/37667168300) |
+| Parsing and Pester | Windows PowerShell 5.1 | 141 passed, 0 failed, 0 skipped | Same CI run |
+| Parsing and Pester | PowerShell 7 | 141 passed, 0 failed, 0 skipped | Same CI run |
+| PSScriptAnalyzer | Both Windows runtimes | 0 errors, 0 warnings | Same CI run |
+| Live audit/report, RMM, no-write preview | Hosted Windows VM | Passed | Same CI run |
+| Workflow validation | Hosted Linux | Passed | Same CI run |
+
 ## Published v2.0.1 evidence
 
 Evidence snapshot: **2026-10-07**, source commit
@@ -26,9 +43,13 @@ For development changes, use the corresponding PR's checks and
 
 ## Manual validation matrix
 
-**All rows below are pending. No physical Windows system is available in the current
-validation environment.** Do not describe v2.0.1 or the unreleased development version
-as fully hardware-validated. Repeat relevant checks on both PowerShell runtimes.
+**All rows below are pending. Physical Windows checks have not been completed.**
+Do not describe v2.0.1 or v2.0.2 as fully hardware-validated. Repeat relevant checks
+on both PowerShell runtimes.
+
+The maintainer approved publishing v2.0.2 before these checks on **2026-10-07** and
+plans physical validation for **Saturday, 2026-10-10**. This is a planned test date,
+not validation evidence. Update statuses only after actual test records are available.
 
 | Scenario | Required environment | Expected evidence | Status |
 |---|---|---|---|

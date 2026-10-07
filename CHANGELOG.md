@@ -1,6 +1,6 @@
 # WinDSH changelog
 
-## v2.0.2 — Unreleased
+## v2.0.2 — 2026-10-07
 
 ### Changed
 
@@ -17,6 +17,17 @@
 - Record the maintainer's approval of process-scoped Bypass for the launcher and
   self-elevation. Runtime behavior is unchanged; persistent policy changes, Mark of
   the Web removal, and organization policy overrides remain prohibited.
+
+### Validation
+
+All five CI jobs passed. Windows PowerShell 5.1 and PowerShell 7 each
+passed 141 tests with no failures or skips. PSScriptAnalyzer reported zero errors
+and warnings. Live Windows audit/report, RMM, and no-write preview checks passed.
+
+Physical Windows validation remains pending and is planned for **2026-10-10**.
+The maintainer approved publication before those checks. Record actual results in
+the [validation matrix](docs/VALIDATION.md); a hosted VM does not establish physical
+hardware compatibility.
 
 ## v2.0.1 — 2026-10-07
 
