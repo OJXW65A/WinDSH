@@ -17,6 +17,13 @@
 - Check the administrator token instead of the Server service in the launcher;
   wait for elevated completion and return the application's exit code.
 - Refresh boot and hardware facts on an explicit interactive re-check.
+- Keep failed firmware, virtualization, TPM, edition, build, and boot queries
+  unknown instead of excluding them from the score or allowing remediation.
+- Preserve unknown BitLocker protection status in firmware warnings. Recommend
+  firmware changes only for confirmed findings, and offer firmware reboot only
+  for UEFI systems with a firmware setting to change.
+- Avoid inferring a completed reboot from absent pending markers. Keep unknown
+  CIS runtime evidence visible in reports and use a warning color for incomplete scores.
 - Refuse release reruns that could replace published assets or mix files into an
   existing draft. Fail closed when the authenticated release check is unavailable.
 
@@ -26,6 +33,10 @@
   reducing those queries from six to three per full assessment.
 - Document JSON/RMM schema 2.1, unknown evidence, and separate apply/rollback counts.
 - Add regressions for the audited failures and Windows launcher process handling.
+- Resolve child-process test hosts from `PSHOME`, so restricted process views do
+  not break portable tests.
+- Ignore the default debug log and clarify draft-release naming, ZIP verification,
+  and the requirement to keep published tags unchanged.
 
 Physical Windows remediation, UAC, driver, policy, and firmware checks remain part
 of the release validation process. This source version has not been published.

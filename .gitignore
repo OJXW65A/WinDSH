@@ -1,6 +1,6 @@
 # WinDSH generated reports/logs
 WinDSH-Reports/
-WinDSH-Debug-*.log
+WinDSH-Debug*.log
 
 # Release packages
 dist/
