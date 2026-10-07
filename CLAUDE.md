@@ -26,7 +26,7 @@ WinDSH does **not**, ever:
 - clear or provision the TPM
 - modify Secure Boot keys
 - modify antivirus configuration or add exclusions
-- bypass any security policy
+- bypass organization Group Policy or other enforced security controls
 - write the Group Policy hive (`HKLM\SOFTWARE\Policies\...`) — it is read-only, used to
   detect managed settings and to evaluate CIS compliance
 - download or execute external code
@@ -111,18 +111,24 @@ Project history matters here beyond tidiness: SignPath Foundation declined the c
 signing application on public-visibility grounds, and sustained, legible activity is part
 of what they asked for. Avoid squashing unrelated work into one opaque commit.
 
-## Open question — do not resolve unilaterally
+## Approved launcher execution policy
 
-The original design rules stated **"do not use ExecutionPolicy bypass"**. The v2 launcher
-(`Run-WinDSH-AsAdmin.bat`) uses process-scope `-ExecutionPolicy Bypass`, adopted to replace
-the previous behaviour of silently stripping Mark of the Web from `WinDSH.ps1`.
+On **2026-10-07**, the maintainer approved keeping the existing **process-scoped
+`-ExecutionPolicy Bypass`** behavior for one-click launch. This resolves the earlier
+open design question; it does not change runtime behavior.
 
-Argument for the change: process-scope Bypass affects one child process and ends with it,
-whereas stripping MOTW permanently edits the file and removes the "came from the internet"
-signal for every other program, forever.
+- Use this setting only for PowerShell child processes started by
+  `Run-WinDSH-AsAdmin.bat` or the script's self-elevation path.
+- Never change persistent `CurrentUser` or `LocalMachine` execution policy.
+- Preserve Mark of the Web; do not restore automatic `Unblock-File` or equivalent
+  file modification.
+- Respect `MachinePolicy` and `UserPolicy`, which take precedence. Do not work around
+  organization policy that blocks the unsigned script.
+- Keep unsigned-release and download-verification disclosures accurate. Process-scoped
+  Bypass does not authenticate the publisher.
 
-The maintainer has **not decided**. Do not quietly revert it and do not quietly enshrine
-it. If the launcher comes up, ask.
+See [the usage guide](docs/USAGE.md#execution-policy-and-code-signing) for the public
+explanation. Future changes to this launch policy require an explicit maintainer decision.
 
 ## Validation status
 

@@ -14,6 +14,9 @@
   generator that does not query or modify the host.
 - Add a Windows validation matrix and manual test protocol. Outstanding physical
   Windows checks remain explicitly pending; a sample report is not test evidence.
+- Record the maintainer's approval of process-scoped Bypass for the launcher and
+  self-elevation. Runtime behavior is unchanged; persistent policy changes, Mark of
+  the Web removal, and organization policy overrides remain prohibited.
 
 ## v2.0.1 — 2026-10-07
 
@@ -172,7 +175,8 @@ Full rebuild. Same distribution model (one `WinDSH.ps1` plus the launcher), new 
 
 - No BitLocker or encryption management. BitLocker status is read only, to warn before
   firmware changes.
-- No TPM clearing, no Secure Boot key changes, no antivirus modification, no policy bypass.
+- No TPM clearing, no Secure Boot key changes, no antivirus modification, no organization
+  policy bypass.
 - The Group Policy hive is never written. Policy-managed values are detected and left alone.
 - No network access, no encoded commands, no remote downloads.
 - The self-integrity check detects accidental corruption and is not a security boundary.
