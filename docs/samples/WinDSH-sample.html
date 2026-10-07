@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WinDSH security report - SAMPLE-PC</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1a202c;--muted:#5a6472;--line:#e2e6ec;
+--ok:#1a7f43;--warn:#b7791f;--bad:#c53030;--na:#718096;}
+@media (prefers-color-scheme:dark){:root{--bg:#14171c;--card:#1d2128;--ink:#e8eaed;
+--muted:#9aa4b2;--line:#2d333d;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171;--na:#94a3b8;}}
+*{box-sizing:border-box}
+body{margin:0;padding:24px;background:var(--bg);color:var(--ink);
+font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:24px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 12px;
+padding-bottom:6px;border-bottom:2px solid var(--line)}
+.sub{color:var(--muted);font-size:13px;margin-bottom:24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:20px;margin-bottom:16px}
+.hero{display:flex;gap:28px;align-items:center;flex-wrap:wrap}
+.gauge{flex:0 0 180px;text-align:center}
+.gv{font-size:40px;font-weight:700;line-height:1}
+.gl{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.hero-txt{flex:1;min-width:260px}
+.verdict{font-size:17px;margin:0 0 8px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap}
+.ok{background:rgba(26,127,67,.13);color:var(--ok)}
+.warn{background:rgba(183,121,31,.15);color:var(--warn)}
+.bad{background:rgba(197,48,48,.13);color:var(--bad)}
+.na{background:rgba(113,128,150,.15);color:var(--na)}
+.kv{display:grid;grid-template-columns:200px 1fr;gap:6px 16px;font-size:14px}
+.kv dt{color:var(--muted)}.kv dd{margin:0}
+.note{background:rgba(183,121,31,.1);border-left:3px solid var(--warn);padding:12px 14px;
+border-radius:0 6px 6px 0;font-size:14px;margin:12px 0}
+.item{border-top:1px solid var(--line);padding:14px 0}
+.item:first-child{border-top:0}
+.item h3{margin:0 0 4px;font-size:15px}
+.why{color:var(--muted);font-size:13.5px;margin:4px 0}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;
+font-size:12.5px;white-space:pre-wrap;word-break:break-word;margin:8px 0 0}
+.tiny{font-size:12px;color:var(--muted)}
+a{color:inherit}
+@media print{body{background:#fff;padding:0}.card{break-inside:avoid;border-color:#ccc}}
+</style></head><body><div class="wrap">
+<div class="note" role="note"><strong>Illustrative sample - synthetic data.</strong> Not an audit of a real computer and not hardware-validation evidence.</div><h1>Windows device security report</h1>
+<div class="sub">SAMPLE-PC &middot; generated 2026-10-07 00:00:00 &middot; WinDSH 2.0.2</div>
+<div class="card hero">
+<div class="gauge"><svg viewBox="0 0 180 180" width="160" height="160" role="img" aria-label="Applicable protection score">
+<circle cx="90" cy="90" r="70" fill="none" stroke="var(--line)" stroke-width="16"/>
+<circle cx="90" cy="90" r="70" fill="none" stroke="#b7791f" stroke-width="16" stroke-linecap="round" stroke-dasharray="365.05 74.77" transform="rotate(-90 90 90)"/>
+<text x="90" y="86" text-anchor="middle" font-size="40" font-weight="700" fill="currentColor">83</text>
+<text x="90" y="108" text-anchor="middle" font-size="13" fill="currentColor" opacity="0.65">out of 100</text>
+</svg>
+<div class="gl">Incomplete assessment</div></div>
+<div class="hero-txt">
+<h2>Applicable protection score</h2>
+<p class="tiny">8 of 8 controls are included in scoring; confirmed unsupported controls are excluded.</p>
+<p class="verdict">6 of 11 applicable protections are active on this computer.</p>
+<p class="note">1 scored protection(s) could not be verified. No points are credited for them, and they remain in the total.</p>
+<p class="tiny">Secured-core PC qualification is not confirmed (2 requirement(s) unmet or unverified).</p>
+</div></div>
+<h2>This computer</h2><div class="card"><dl class="kv">
+<dt>Computer name</dt><dd>SAMPLE-PC</dd>
+<dt>Make and model</dt><dd>Example vendor Synthetic workstation</dd>
+<dt>Processor</dt><dd>Example 64-bit processor</dd>
+<dt>Windows</dt><dd>Windows 11 Enterprise (build 26100)</dd>
+<dt>Edition</dt><dd>Enterprise</dd>
+<dt>Firmware mode</dt><dd>UEFI</dd>
+<dt>Secure Boot</dt><dd>Enabled</dd>
+<dt>TPM 2.0</dt><dd>Present</dd>
+<dt>Hypervisor launch type</dt><dd>NotSet</dd>
+<dt>Virtual machine</dt><dd>No</dd>
+<dt>Restart pending</dt><dd>Yes</dd>
+</dl></div>
+<h2>Protections</h2><div class="card"><table><thead><tr>
+<th>Protection</th><th>What it does</th><th>Status</th><th>Points</th></tr></thead><tbody>
+<tr><td><strong>Core security container</strong><br><span class="tiny">Virtualization-based Security</span></td><td>Uses the Windows hypervisor to create a protected area of memory that the rest of Windows cannot reach.</td><td><span class="badge ok">Active</span></td><td>25 / 25</td></tr>
+<tr><td><strong>Secure Boot requirement</strong><br><span class="tiny">Platform Security Level</span></td><td>Requires Secure Boot before the security container is allowed to start.</td><td><span class="badge ok">Active</span></td><td>10 / 10</td></tr>
+<tr><td><strong>Driver protection</strong><br><span class="tiny">Memory Integrity (HVCI)</span></td><td>Checks every driver inside the protected container before Windows will load it.</td><td><span class="badge ok">Active</span></td><td>25 / 25</td></tr>
+<tr><td><strong>Firmware compatibility check</strong><br><span class="tiny">Require UEFI Memory Attributes Table</span></td><td>Only allows driver protection to start on firmware that reports a UEFI Memory Attributes Table.</td><td><span class="badge bad">Off</span></td><td>0 / 5</td></tr>
+<tr><td><strong>Password and sign-in protection</strong><br><span class="tiny">Credential Guard</span></td><td>Moves your saved sign-in secrets into the protected container so malware on the computer cannot read them.</td><td><span class="badge ok">Active</span></td><td>20 / 20</td></tr>
+<tr><td><strong>Firmware attack protection</strong><br><span class="tiny">System Guard Secure Launch</span></td><td>Re-establishes trust in the computer after start-up, so a compromised firmware cannot undermine the other protections.</td><td><span class="badge warn">Configured; not active</span></td><td>5 / 10</td></tr>
+<tr><td><strong>Code hijacking protection</strong><br><span class="tiny">Kernel-mode Hardware-enforced Stack Protection</span></td><td>Keeps a hardware-protected copy of where kernel code is meant to return to, so an exploit cannot redirect it.</td><td><span class="badge warn">Unable to verify</span> <span class="badge na">Group Policy</span></td><td>0 / 10</td></tr>
+<tr><td><strong>Memory address protection</strong><br><span class="tiny">Hypervisor-enforced Paging Translation</span></td><td>Moves control of memory address translation into the protected container.</td><td><span class="badge bad">Off</span></td><td>0 / 0</td></tr>
+<tr><td><strong>Firmware self-check</strong><br><span class="tiny">SMM Firmware Measurement</span></td><td>Measures System Management Mode firmware so tampering with it can be detected.</td><td><span class="badge bad">Off</span></td><td>0 / 0</td></tr>
+<tr><td><strong>Executable memory protection</strong><br><span class="tiny">Data Execution Prevention</span></td><td>Stops code running from memory that is only meant to hold data.</td><td><span class="badge ok">Active</span></td><td>0 / 0</td></tr>
+<tr><td><strong>Known-bad driver blocking</strong><br><span class="tiny">Microsoft vulnerable driver blocklist</span></td><td>Blocks drivers Microsoft has identified as dangerous, even when they are correctly signed.</td><td><span class="badge ok">Active</span></td><td>15 / 15</td></tr>
+</tbody></table></div>
+<h2>What to do next</h2><div class="card">
+<div class="item">
+<h3>Firmware compatibility check</h3>
+<p class="why">Require UEFI Memory Attributes Table is not configured.</p>
+<pre>This tool can configure it. Run with -Enable hvci-mat</pre>
+</div>
+<div class="item">
+<h3>Firmware attack protection</h3>
+<p class="why">System Guard Secure Launch is configured but not active, and a restart is pending.</p>
+<pre>Restart Windows, then run the audit again.</pre>
+<p class="tiny"><strong>Note:</strong> Needs DRTM-capable firmware (Intel TXT or AMD SKINIT). Most consumer laptops do not have it, and Windows silently ignores the setting when it is absent.</p>
+</div>
+<div class="item">
+<h3>Code hijacking protection</h3>
+<p class="why">Configuration evidence for Kernel-mode Hardware-enforced Stack Protection could not be verified.</p>
+<pre>Review the registry or policy read error and restore access before remediation. WinDSH will skip this protection.</pre>
+<p class="tiny"><strong>Note:</strong> Requires Windows 11 22H2 or newer and an Intel Tiger Lake or AMD Zen 3 processor or newer. Once enforcing, a shadow stack violation is fatal to the offending code.</p>
+</div>
+<div class="item">
+<h3>Memory address protection</h3>
+<p class="why">Hypervisor-enforced Paging Translation is not active on this computer.</p>
+<pre>WinDSH reports this but does not configure it. It is provided by Windows or the platform firmware.</pre>
+<p class="tiny"><strong>Note:</strong> Reported only. Windows enables this on supported hardware; WinDSH does not configure it.</p>
+</div>
+<div class="item">
+<h3>Firmware self-check</h3>
+<p class="why">SMM Firmware Measurement is not active on this computer.</p>
+<pre>WinDSH reports this but does not configure it. It is provided by Windows or the platform firmware.</pre>
+<p class="tiny"><strong>Note:</strong> Reported only. Provided by the platform firmware; WinDSH does not configure it.</p>
+</div>
+</div>
+<h2>CIS Benchmark comparison</h2>
+<div class="card">
+<p class="tiny">CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0 &middot; section 18.9.5 Device Guard</p>
+<div class="note"><strong>Read this before using these results.</strong> CIS audits the Group Policy hive. WinDSH configures local machine values and never writes Group Policy, so features can be active while these checks still report non-compliant.</div>
+<p>0 of 7 checks pass. 4 protection(s) are actually running on this computer but still fail their CIS check for the reason above.</p>
+<table><thead><tr><th>CIS</th><th>Requirement</th><th>Policy value</th><th>CIS result</th><th>Actually running</th></tr></thead><tbody>
+<tr><td>18.9.5.1<br><span class="tiny">L1</span></td><td>Ensure &#39;Turn On Virtualization Based Security&#39; is set to &#39;Enabled&#39;</td><td><code>EnableVirtualizationBasedSecurity</code> = not set</td><td><span class="badge bad">Fail</span></td><td><span class="badge ok">Yes</span></td></tr>
+<tr><td>18.9.5.2<br><span class="tiny">L1</span></td><td>Ensure &#39;Select Platform Security Level&#39; is set to &#39;Secure Boot&#39; or higher</td><td><code>RequirePlatformSecurityFeatures</code> = not set</td><td><span class="badge bad">Fail</span></td><td><span class="badge ok">Yes</span></td></tr>
+<tr><td>18.9.5.3<br><span class="tiny">L1</span></td><td>Ensure &#39;Virtualization Based Protection of Code Integrity&#39; is set to &#39;Enabled with UEFI lock&#39;</td><td><code>HypervisorEnforcedCodeIntegrity</code> = not set</td><td><span class="badge bad">Fail</span></td><td><span class="badge ok">Yes</span></td></tr>
+<tr><td></td><td colspan="4" class="tiny"><strong>Deliberate difference:</strong> WinDSH configures Memory Integrity WITHOUT a UEFI lock so it can be reverted from Windows. CIS requires the locked form, which can only be removed with a physically present user.</td></tr>
+<tr><td>18.9.5.4<br><span class="tiny">L1</span></td><td>Ensure &#39;Require UEFI Memory Attributes Table&#39; is set to &#39;True (checked)&#39;</td><td><code>HVCIMATRequired</code> = not set</td><td><span class="badge bad">Fail</span></td><td><span class="badge na">No</span></td></tr>
+<tr><td>18.9.5.5<br><span class="tiny">L1</span></td><td>Ensure &#39;Credential Guard Configuration&#39; is set to &#39;Enabled with UEFI lock&#39;</td><td><code>LsaCfgFlags</code> = not set</td><td><span class="badge bad">Fail</span></td><td><span class="badge ok">Yes</span></td></tr>
+<tr><td></td><td colspan="4" class="tiny"><strong>Deliberate difference:</strong> WinDSH sets LsaCfgFlags = 2 (enabled without UEFI lock) locally. CIS requires 1. The locked form cannot be removed remotely and needs a physically present user at the machine.</td></tr>
+<tr><td>18.9.5.6<br><span class="tiny">L1</span></td><td>Ensure &#39;Secure Launch Configuration&#39; is set to &#39;Enabled&#39;</td><td><code>ConfigureSystemGuardLaunch</code> = not set</td><td><span class="badge bad">Fail</span></td><td><span class="badge na">No</span></td></tr>
+<tr><td>18.9.5.7<br><span class="tiny">L1</span></td><td>Ensure &#39;Kernel-mode Hardware-enforced Stack Protection&#39; is set to &#39;Enabled: Enabled in enforcement mode&#39;</td><td><code>ConfigureKernelShadowStacksLaunch</code> = unavailable</td><td><span class="badge warn">Unknown</span></td><td><span class="badge na">No</span></td></tr>
+</tbody></table></div>
+<h2>Secured-core PC criteria</h2><div class="card"><table><thead><tr><th>Requirement</th><th>Status</th></tr></thead><tbody>
+<tr><td>UEFI firmware mode</td><td><span class="badge ok">Met</span></td></tr>
+<tr><td>Secure Boot enabled</td><td><span class="badge ok">Met</span></td></tr>
+<tr><td>TPM 2.0</td><td><span class="badge ok">Met</span></td></tr>
+<tr><td>Virtualization-based Security running</td><td><span class="badge ok">Met</span></td></tr>
+<tr><td>Memory Integrity running</td><td><span class="badge ok">Met</span></td></tr>
+<tr><td>System Guard Secure Launch running</td><td><span class="badge bad">Not met</span></td></tr>
+<tr><td>DMA protection available</td><td><span class="badge ok">Met</span></td></tr>
+<tr><td>SMM mitigations available</td><td><span class="badge bad">Not met</span></td></tr>
+</tbody></table></div>
+<p class="tiny">Generated by WinDSH 2.0.2. This report describes configuration state only and is not a vulnerability assessment. WinDSH writes local machine settings and never modifies Group Policy.</p>
+</div></body></html>

@@ -17,7 +17,8 @@
 4. Record an interactive Windows check on representative hardware, including
    audit, preview, deliberately selected remediation, restart if required, and
    rollback. Validate firmware/driver/policy behavior relevant to the release.
-   CI coverage on a hosted VM does not replace these checks.
+   CI coverage on a hosted VM does not replace these checks. Follow the
+   [validation matrix and test protocol](VALIDATION.md), and attach actual test records.
 5. Review the changelog, README version status, supported-version policy, and
    release notes. Date the version being released and describe its actual changes.
 

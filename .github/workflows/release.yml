@@ -145,6 +145,10 @@ jobs:
               'docs/USAGE.md'
               'docs/REPORT_SCHEMA.md'
               'docs/RELEASING.md'
+              'docs/VALIDATION.md'
+              'docs/SAMPLE_REPORT.md'
+              'docs/samples/WinDSH-sample.html'
+              'assets/report-preview.png'
               'assets/bitcoin-qr.png'
           )
           foreach ($file in $payload) {
