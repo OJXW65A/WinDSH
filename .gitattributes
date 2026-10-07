@@ -1,8 +1,8 @@
 * text=auto eol=lf
 
 # Preserve the generated script and Windows launcher bytes used in ZIP checksums.
-/WinDSH.ps1 -text -eol
-*.bat -text -eol
+/WinDSH.ps1 -text -eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.bat -text -eol whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 
 *.png -text -eol
 *.jpg -text -eol

@@ -3,6 +3,8 @@
 .SYNOPSIS
     Download, hash-verify, and import one CI module from the checked-in package lock.
 #>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+    Justification = 'Dependency verification diagnostics stay separate from imported module output.')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]

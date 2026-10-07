@@ -24,26 +24,26 @@ function Get-ControlRunningState {
             }
         }
         'Hvci' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 2); RunningKnown = $servicesKnown }
         }
         'CredentialGuard' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 1); RunningKnown = $servicesKnown }
         }
         'SecureLaunch' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 3); RunningKnown = $servicesKnown }
         }
         'KernelShadowStacks' {
             return [pscustomobject]@{
-                Running = (Test-Contains $dg.Running 5)
+                Running = (Test-CollectionMember $dg.Running 5)
                 RunningKnown = $servicesKnown
-                AuditMode = [bool]((Test-Contains $dg.Running 6) -and -not (Test-Contains $dg.Running 5))
+                AuditMode = [bool]((Test-CollectionMember $dg.Running 6) -and -not (Test-CollectionMember $dg.Running 5))
             }
         }
         'Hvpt' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 7); RunningKnown = $servicesKnown }
         }
         'SmmFirmware' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 4); RunningKnown = $servicesKnown }
         }
         'Dep' {
             return [pscustomobject]@{ Running = [bool]$State.Dep.Enabled; RunningKnown = [bool]($null -ne $State.Dep.SupportPolicy) }
@@ -177,7 +177,7 @@ function Get-ControlPreflight {
         'CodeIntegrityEvents' {
             $ids = ConvertTo-Array $preflight.EventIds
             $days = if ($preflight.ContainsKey('LookbackDays')) { [int]$preflight.LookbackDays } else { 14 }
-            $events = Get-CodeIntegrityEvents -EventIds $ids -LookbackDays $days
+            $events = Get-CodeIntegrityEvent -EventIds $ids -LookbackDays $days
 
             return [pscustomobject]@{
                 Kind = $preflight.Kind
@@ -256,7 +256,7 @@ function Get-ControlStatus {
 function Get-AllControlStatus {
     param([Parameter(Mandatory = $true)]$State)
     $results = @()
-    foreach ($id in (Get-ControlIds)) { $results += Get-ControlStatus -Id $id -State $State }
+    foreach ($id in (Get-ControlId)) { $results += Get-ControlStatus -Id $id -State $State }
     return $results
 }
 

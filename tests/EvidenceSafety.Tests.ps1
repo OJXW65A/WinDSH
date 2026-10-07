@@ -21,7 +21,7 @@ Describe 'Platform evidence safety' {
         Set-RegistryProvider (New-InMemoryRegistryProvider)
         $testState = New-SyntheticState
         $script:Warnings = @(); $script:RestartRequired = $false
-        Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
+        Mock Get-CodeIntegrityEvent { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
     }
 
     It 'retains unverified prerequisites in scoring and blocks remediation: <Case>' -TestCases @(

@@ -232,11 +232,11 @@ function Get-DeviceGuardState {
         CodeIntegrityPolicyEnforcement = $ciPolicy
         # AvailableSecurityProperties: 1 hypervisor, 2 Secure Boot, 3 DMA protection,
         # 4 secure memory overwrite, 5 NX, 6 SMM mitigations, 7 MBEC, 8 APIC virtualization
-        HasHypervisorSupport = (Test-Contains $available 1)
-        HasSecureBootProperty = (Test-Contains $available 2)
-        HasDmaProtection = (Test-Contains $available 3)
-        HasSmmMitigations = (Test-Contains $available 6)
-        HasMbec = (Test-Contains $available 7)
+        HasHypervisorSupport = (Test-CollectionMember $available 1)
+        HasSecureBootProperty = (Test-CollectionMember $available 2)
+        HasDmaProtection = (Test-CollectionMember $available 3)
+        HasSmmMitigations = (Test-CollectionMember $available 6)
+        HasMbec = (Test-CollectionMember $available 7)
     }
 }
 
@@ -303,7 +303,7 @@ function Get-VirtualMachineAssessment {
     return [pscustomobject]@{ IsVirtual = $true; Platform = $platform; Notes = $notes }
 }
 
-function Get-CodeIntegrityEvents {
+function Get-CodeIntegrityEvent {
     <#
         Reads driver-compatibility evidence from the Code Integrity log. Feeds BOTH the
         Memory Integrity diagnostic and the pre-flight safety check, so the log is parsed

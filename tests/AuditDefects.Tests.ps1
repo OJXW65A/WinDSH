@@ -38,7 +38,7 @@ Describe 'Audit defect regressions' {
         Mock Test-IsElevated { $true }
         Mock Get-SelfIntegrity { [pscustomobject]@{ Status = 'OK' } }
         Mock Get-SystemState { $testState }
-        Mock Get-CodeIntegrityEvents { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
+        Mock Get-CodeIntegrityEvent { [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null } }
         Mock Write-Line {}
         Mock Write-Section {}
     }
@@ -262,7 +262,7 @@ Describe 'Audit defect regressions' {
         $NoReport = $false
         $assessment = Get-Assessment $testState
         $args = @{ State = $testState; Statuses = $assessment.Statuses; Score = $assessment.Score; SecuredCore = $assessment.SecuredCore; Cis = $assessment.Cis; Explanations = $assessment.Explanations }
-        $paths = @(Save-Reports @args -Formats @{ Html = $true; Text = $true; Json = $true })
+        $paths = @(Save-Report @args -Formats @{ Html = $true; Text = $true; Json = $true })
         $json = Get-Content -Raw ($paths | Where-Object { $_ -like '*.json' }) | ConvertFrom-Json
         $json.RevertedChanges.Count | Should -Be 1
         $json.RevertedChanges[0].RestoredTo | Should -Be 0
@@ -309,11 +309,11 @@ Describe 'Audit defect regressions' {
         $NoReport = $false
         $assessment = Get-Assessment $testState
         $args = @{ State = $testState; Statuses = $assessment.Statuses; Score = $assessment.Score; SecuredCore = $assessment.SecuredCore; Cis = $assessment.Cis; Explanations = $assessment.Explanations }
-        $first = @(Save-Reports @args -Formats @{ Html = $true; Text = $true; Json = $true })
+        $first = @(Save-Report @args -Formats @{ Html = $true; Text = $true; Json = $true })
         $snapshot = @{}
         foreach ($path in $first) { $snapshot[$path] = [IO.File]::ReadAllText($path) }
         $testState.Computer.Model = 'Second assessment'
-        $second = @(Save-Reports @args -Formats @{ Html = $true; Text = $true; Json = $true })
+        $second = @(Save-Report @args -Formats @{ Html = $true; Text = $true; Json = $true })
         @($first + $second | Select-Object -Unique).Count | Should -Be 6
         foreach ($path in $first) { [IO.File]::ReadAllText($path) | Should -BeExactly $snapshot[$path] }
         $json = Get-Content -Raw ($second | Where-Object { $_ -like '*.json' }) | ConvertFrom-Json
@@ -333,7 +333,7 @@ Describe 'Audit defect regressions' {
         Mock Wait-ForKey {}
         Mock Show-Menu {}
         Mock Show-Summary {}
-        Mock Show-NextSteps {}
+        Mock Show-NextStep {}
         Invoke-Interactive -State $testState
         Should -Invoke Get-SystemState -Times 1 -Exactly -ParameterFilter { -not [bool]$Volatile }
         Should -Invoke Get-SystemState -Times 0 -Exactly -ParameterFilter { [bool]$Volatile }

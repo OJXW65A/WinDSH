@@ -4,6 +4,8 @@
 # ---------------------------------------------------------------------------
 
 function New-TextReport {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Returns report text only; file writes are handled separately.')]
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$Statuses,

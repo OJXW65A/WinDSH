@@ -144,12 +144,12 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $script:ToolName        = 'WinDSH'
-$script:ToolVersion     = '2.0.1'
+$script:ToolVersion     = '2.0.2'
 $script:SchemaVersion   = '2.1'
 $script:CisBenchmark    = 'CIS Microsoft Windows 11 Enterprise Benchmark v5.1.0'
 
 # Replaced by build/Build-WinDSH.ps1. Detects accidental corruption, not tampering.
-$script:ExpectedIntegrityHash = 'c3f180e7c7e1c4bc83783881505c5fbff4902c7eb87ce66d83b1daa8328e8d0d'
+$script:ExpectedIntegrityHash = '56a18957cb4cb2671f22660fed6c4cd256ec120120241ac22831c5e232f93caa'
 $script:RemediationAllowed = $true
 $script:RestartRequired    = $false
 $script:Warnings           = @()
@@ -173,6 +173,8 @@ function Initialize-Console {
 function Write-Line {
     # Every status carries a text marker as well as colour, so the output is readable
     # when colour is unavailable, redirected, or the reader cannot distinguish it.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'Human console output stays on the host stream so RMM stdout contains only JSON.')]
     param(
         [string]$Text = '',
         [ValidateSet('Plain', 'Good', 'Warn', 'Bad', 'Info', 'Head', 'Dim')]
@@ -208,7 +210,7 @@ function Write-Line {
 function Write-Section {
     param([string]$Title)
     if ($Rmm) { return }
-    Write-Host ''
+    Write-Line ''
     Write-Line ('== {0} ==' -f $Title) 'Head'
 }
 
@@ -226,7 +228,10 @@ function Write-Debug-Log {
         $stamp = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff')
         [IO.File]::AppendAllText($script:DebugPath, ('[{0}] {1}{2}' -f $stamp, $Message, "`n"))
     }
-    catch { }
+    catch {
+        # Optional logging must not interrupt an audit or pollute structured stdout.
+        return
+    }
 }
 
 function Write-DebugError {
@@ -265,7 +270,7 @@ function ConvertTo-Array {
     return @($Value)
 }
 
-function Test-Contains {
+function Test-CollectionMember {
     param($Collection, $Value)
     return [bool](@(ConvertTo-Array $Collection) -contains $Value)
 }
@@ -285,6 +290,9 @@ function Format-Bool {
 # ---------------------------------------------------------------------------
 
 function New-RegistryProvider {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates a provider descriptor; its callbacks run only when explicitly invoked.')]
+    param()
     return @{
         Kind = 'Windows'
         GetValue = {
@@ -319,6 +327,8 @@ function New-RegistryProvider {
 }
 
 function New-InMemoryRegistryProvider {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates isolated test data and does not access the Windows registry.')]
     param([hashtable]$Seed)
     $store = @{}
     $kinds = @{}
@@ -359,7 +369,12 @@ function New-InMemoryRegistryProvider {
 
 $script:Registry = New-RegistryProvider
 
-function Set-RegistryProvider { param($Provider) $script:Registry = $Provider }
+function Set-RegistryProvider {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Selects the script-local provider; it does not change machine configuration.')]
+    param($Provider)
+    $script:Registry = $Provider
+}
 function Get-RegValue { param([string]$Path, [string]$Name) return (& $script:Registry.GetValue $Path $Name) }
 function Get-RegKind { param([string]$Path, [string]$Name) return (& $script:Registry.GetKind $Path $Name) }
 function Test-RegValue { param([string]$Path, [string]$Name) return [bool](& $script:Registry.ValueExists $Path $Name) }
@@ -457,7 +472,7 @@ function Get-RelaunchArgumentList {
         if ($key -notin @('AuditOnly', 'EnableAllSafe', 'Enable', 'Revert', 'RunId', 'ListControls', 'Explain', 'HtmlReport', 'JsonReport', 'TextReport', 'NoReport', 'ReportDirectory', 'Rmm', 'Advanced', 'NoColor', 'AutoReboot', 'DebugLogPath', 'SelfTest', 'Version', 'WhatIf', 'Confirm')) { throw ('Cannot forward unknown parameter {0}.' -f $key) }
         $value = $Bound[$key]
         if ($key -eq 'Enable') {
-            $controlIds = @(ConvertTo-ControlIds -Ids @($value))
+            $controlIds = @(ConvertTo-ControlId -Ids @($value))
             $list += '-Enable'
             $list += ConvertTo-NativeArgument -Value ($controlIds -join ',')
             continue
@@ -478,13 +493,13 @@ function Get-RelaunchArgumentList {
     return $list
 }
 
-function ConvertTo-ControlIds {
+function ConvertTo-ControlId {
     param([string[]]$Ids)
     $normalized = @()
     foreach ($entry in (ConvertTo-Array $Ids)) {
         foreach ($part in ($entry -split ',')) {
             $controlId = $part.Trim().ToLowerInvariant()
-            if (-not (Test-Contains (Get-ControlIds) $controlId)) { throw ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $controlId) }
+            if (-not (Test-CollectionMember (Get-ControlId) $controlId)) { throw ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $controlId) }
             if ($normalized -notcontains $controlId) { $normalized += $controlId }
         }
     }
@@ -924,7 +939,7 @@ function Get-Control {
     return $match[0]
 }
 
-function Get-ControlIds { return @($script:ControlCatalog | Select-Object -ExpandProperty Id) }
+function Get-ControlId { return @($script:ControlCatalog | Select-Object -ExpandProperty Id) }
 
 function Resolve-ControlOrder {
     <# Dependencies first, deduplicated, with cycle detection. #>
@@ -1190,11 +1205,11 @@ function Get-DeviceGuardState {
         CodeIntegrityPolicyEnforcement = $ciPolicy
         # AvailableSecurityProperties: 1 hypervisor, 2 Secure Boot, 3 DMA protection,
         # 4 secure memory overwrite, 5 NX, 6 SMM mitigations, 7 MBEC, 8 APIC virtualization
-        HasHypervisorSupport = (Test-Contains $available 1)
-        HasSecureBootProperty = (Test-Contains $available 2)
-        HasDmaProtection = (Test-Contains $available 3)
-        HasSmmMitigations = (Test-Contains $available 6)
-        HasMbec = (Test-Contains $available 7)
+        HasHypervisorSupport = (Test-CollectionMember $available 1)
+        HasSecureBootProperty = (Test-CollectionMember $available 2)
+        HasDmaProtection = (Test-CollectionMember $available 3)
+        HasSmmMitigations = (Test-CollectionMember $available 6)
+        HasMbec = (Test-CollectionMember $available 7)
     }
 }
 
@@ -1261,7 +1276,7 @@ function Get-VirtualMachineAssessment {
     return [pscustomobject]@{ IsVirtual = $true; Platform = $platform; Notes = $notes }
 }
 
-function Get-CodeIntegrityEvents {
+function Get-CodeIntegrityEvent {
     <#
         Reads driver-compatibility evidence from the Code Integrity log. Feeds BOTH the
         Memory Integrity diagnostic and the pre-flight safety check, so the log is parsed
@@ -1506,26 +1521,26 @@ function Get-ControlRunningState {
             }
         }
         'Hvci' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 2); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 2); RunningKnown = $servicesKnown }
         }
         'CredentialGuard' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 1); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 1); RunningKnown = $servicesKnown }
         }
         'SecureLaunch' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 3); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 3); RunningKnown = $servicesKnown }
         }
         'KernelShadowStacks' {
             return [pscustomobject]@{
-                Running = (Test-Contains $dg.Running 5)
+                Running = (Test-CollectionMember $dg.Running 5)
                 RunningKnown = $servicesKnown
-                AuditMode = [bool]((Test-Contains $dg.Running 6) -and -not (Test-Contains $dg.Running 5))
+                AuditMode = [bool]((Test-CollectionMember $dg.Running 6) -and -not (Test-CollectionMember $dg.Running 5))
             }
         }
         'Hvpt' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 7); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 7); RunningKnown = $servicesKnown }
         }
         'SmmFirmware' {
-            return [pscustomobject]@{ Running = (Test-Contains $dg.Running 4); RunningKnown = $servicesKnown }
+            return [pscustomobject]@{ Running = (Test-CollectionMember $dg.Running 4); RunningKnown = $servicesKnown }
         }
         'Dep' {
             return [pscustomobject]@{ Running = [bool]$State.Dep.Enabled; RunningKnown = [bool]($null -ne $State.Dep.SupportPolicy) }
@@ -1659,7 +1674,7 @@ function Get-ControlPreflight {
         'CodeIntegrityEvents' {
             $ids = ConvertTo-Array $preflight.EventIds
             $days = if ($preflight.ContainsKey('LookbackDays')) { [int]$preflight.LookbackDays } else { 14 }
-            $events = Get-CodeIntegrityEvents -EventIds $ids -LookbackDays $days
+            $events = Get-CodeIntegrityEvent -EventIds $ids -LookbackDays $days
 
             return [pscustomobject]@{
                 Kind = $preflight.Kind
@@ -1738,7 +1753,7 @@ function Get-ControlStatus {
 function Get-AllControlStatus {
     param([Parameter(Mandatory = $true)]$State)
     $results = @()
-    foreach ($id in (Get-ControlIds)) { $results += Get-ControlStatus -Id $id -State $State }
+    foreach ($id in (Get-ControlId)) { $results += Get-ControlStatus -Id $id -State $State }
     return $results
 }
 
@@ -2103,7 +2118,7 @@ function Get-DriveEncryptionSummary {
     }
 }
 
-function Get-FirmwareVendorHints {
+function Get-FirmwareVendorHint {
     <#
         Maps a manufacturer to the menu locations its firmware normally uses. Layouts
         differ by model and firmware revision, so every hint is phrased as typical, and an
@@ -2196,7 +2211,7 @@ function Get-FirmwareGuidance {
     <# Pure: returns what needs changing and where. Takes no action. #>
     param([Parameter(Mandatory = $true)]$State)
 
-    $hints = Get-FirmwareVendorHints -Manufacturer $State.Computer.Manufacturer -Model $State.Computer.Model
+    $hints = Get-FirmwareVendorHint -Manufacturer $State.Computer.Manufacturer -Model $State.Computer.Model
     $encryption = Get-DriveEncryptionSummary
     $needed = @()
     $unknown = @()
@@ -2365,11 +2380,9 @@ function Open-CodeIntegrityEventViewer {
     }
 }
 
-function Show-CodeIntegrityDiagnostics {
-    param([Parameter(Mandatory = $true)]$State)
-
+function Show-CodeIntegrityDiagnostic {
     Write-Section 'Memory Integrity driver diagnostics'
-    $events = Get-CodeIntegrityEvents -EventIds @(3087) -LookbackDays 14
+    $events = Get-CodeIntegrityEvent -EventIds @(3087) -LookbackDays 14
 
     if (-not $events.Queried) {
         Write-Line 'The Code Integrity log could not be read.' 'Warn'
@@ -2622,7 +2635,7 @@ function Get-Journal {
     return $entries
 }
 
-function Get-JournalChanges {
+function Get-JournalChange {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Records)
     $changes = @(); $seen = @{}; $index = 0
     foreach ($record in $Records) {
@@ -2644,10 +2657,10 @@ function Get-JournalChanges {
     return $changes
 }
 
-function Get-JournalRuns {
+function Get-JournalRun {
     $runs = @()
     foreach ($group in (Get-Journal | Group-Object RunId)) {
-        $changes = @(Get-JournalChanges -Records @($group.Group) | Where-Object { -not $_.Reverted })
+        $changes = @(Get-JournalChange -Records @($group.Group) | Where-Object { -not $_.Reverted })
         if ($changes.Count -eq 0) { continue }
         if (@($group.Group | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertCompleted' }).Count -gt 0) { continue }
         $first = @($group.Group)[0]
@@ -2814,13 +2827,13 @@ function Invoke-ControlRevert {
     if (-not $WhatIfPreference) { $lock = Enter-JournalLock }
     try {
         if (-not $RunId) {
-            $runs = @(Get-JournalRuns)
+            $runs = @(Get-JournalRun)
             if ($runs.Count -eq 0) { throw 'There is nothing to revert: no open change runs remain.' }
             $RunId = $runs[0].RunId
         }
         $records = @(Get-Journal -RunId $RunId)
         if (@($records | Where-Object { (Get-PropertySafe $_ 'RecordType' '') -eq 'RevertCompleted' }).Count -gt 0) { throw 'This run has already been reverted.' }
-        $changes = @(Get-JournalChanges -Records $records | Where-Object { -not $_.Reverted })
+        $changes = @(Get-JournalChange -Records $records | Where-Object { -not $_.Reverted })
         if ($changes.Count -eq 0) { throw ('No open changes found for run {0}.' -f $RunId) }
         # Validate every change before restoring anything, including legacy records.
         foreach ($change in $changes) { Test-JournalChange -Entry $change.Entry }
@@ -2881,6 +2894,8 @@ function Invoke-ControlRevert {
 # ---------------------------------------------------------------------------
 
 function New-TextReport {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Returns report text only; file writes are handled separately.')]
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$Statuses,
@@ -3040,6 +3055,8 @@ function Get-StateLabel {
 }
 
 function New-HtmlReport {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Returns report markup only; file writes are handled separately.')]
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$Statuses,
@@ -3249,6 +3266,8 @@ a{color:inherit}
 # ---------------------------------------------------------------------------
 
 function New-SyntheticState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Creates synthetic data without querying or changing the host.')]
     param([hashtable]$Override)
 
     $state = [pscustomobject]@{
@@ -3287,8 +3306,14 @@ function New-SyntheticState {
 function Invoke-SelfTest {
     # Scoped event provider: self-tests never query the real host's compatibility log.
     $ciEvidence = [pscustomobject]@{ Queried = $true; EventCount = 0; Drivers = @(); Newest = $null; Error = $null }
-    function Get-CodeIntegrityEvents { param($EventIds, $LookbackDays) return $ciEvidence }
-    $pass = 0; $fail = 0
+    function Get-CodeIntegrityEvent {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'EventIds',
+            Justification = 'Test double preserves the real provider signature without querying the host.')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'LookbackDays',
+            Justification = 'Test double preserves the real provider signature without querying the host.')]
+        param($EventIds, $LookbackDays)
+        return $ciEvidence
+    }
     function Assert-That {
         param([string]$Name, [bool]$Condition, [string]$Detail = '')
         if ($Condition) { $script:stPass++; Write-Line ('{0}{1}' -f $Name, $(if ($Detail) { " - $Detail" } else { '' })) 'Good' }
@@ -3303,7 +3328,7 @@ function Invoke-SelfTest {
     Write-Section ('{0} {1} self-test' -f $script:ToolName, $script:ToolVersion)
 
     # --- catalog integrity ---
-    $ids = Get-ControlIds
+    $ids = Get-ControlId
     Assert-That 'Catalog ids are unique' ((@($ids | Select-Object -Unique)).Count -eq @($ids).Count) ('count={0}' -f @($ids).Count)
 
     $dangling = @()
@@ -3386,7 +3411,7 @@ function Invoke-SelfTest {
         $closedRejected = $false
         try { [void](Invoke-ControlRevert -RunId $applied.RunId) } catch { $closedRejected = $true }
         Assert-That 'A completed run cannot be reverted twice' $closedRejected
-        Assert-That 'Completed runs are excluded from default rollback selection' (@(Get-JournalRuns).Count -eq 0)
+        Assert-That 'Completed runs are excluded from default rollback selection' (@(Get-JournalRun).Count -eq 0)
 
         Set-RegistryProvider (New-InMemoryRegistryProvider -Seed @{ ($script:RegCiConfig + '|VulnerableDriverBlocklistEnable') = 0 })
         $conflictApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
@@ -3431,7 +3456,7 @@ function Invoke-SelfTest {
 
         Set-RegistryProvider (New-InMemoryRegistryProvider)
         $crashApply = Invoke-ControlApply -Ids @('driver-blocklist') -State $clean
-        $crashChange = @(Get-JournalChanges -Records @(Get-Journal -RunId $crashApply.RunId))[0]
+        $crashChange = @(Get-JournalChange -Records @(Get-Journal -RunId $crashApply.RunId))[0]
         Write-JournalMarker -RunId $crashApply.RunId -RecordType 'RevertStarted' -ChangeId $crashChange.Id
         & $script:Registry.RemoveValue $script:RegCiConfig 'VulnerableDriverBlocklistEnable'
         $crashRevert = Invoke-ControlRevert -RunId $crashApply.RunId
@@ -3575,11 +3600,11 @@ function Invoke-SelfTest {
         $safeRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
         Assert-That 'EnableAllSafe skips HVCI when 3087 evidence is present' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
         Assert-That 'Safe-set apply reports the same preflight blocker as preview' (@($safeRisk.Skipped | Where-Object { $_.ControlId -eq 'hvci' }).Count -eq 1)
-        $explicitRisk = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
+        $null = Invoke-ControlApply -Ids @('hvci') -State $clean -ExplicitIds @('hvci')
         Assert-That 'Explicit unattended HVCI cannot bypass a typed override' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
         $ciEvidence.EventCount = 0
         $ciEvidence.Queried = $false
-        $unknownRisk = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
+        $null = Invoke-ControlApply -Ids $script:SafeControlSet -State $clean
         Assert-That 'Unknown compatibility fails closed for the safe set' (-not (Test-RegValue -Path $script:RegHvci -Name 'Enabled'))
         $depRisk = @(Get-ChangePlan -Ids @('kernel-shadow-stacks') -State $clean)
         Assert-That 'A preflight-blocked dependency also blocks shadow stacks' (@($depRisk | Where-Object { $_.ControlId -eq 'kernel-shadow-stacks' -and $_.SkipReason }).Count -eq 1)
@@ -3593,13 +3618,13 @@ function Invoke-SelfTest {
     }
 
     # --- firmware guidance (restored from v1.6.0) ---
-    $hintDell = Get-FirmwareVendorHints -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
+    $hintDell = Get-FirmwareVendorHint -Manufacturer 'Dell Inc.' -Model 'Latitude 7440'
     Assert-That 'Dell firmware hints are matched' (($hintDell.Vendor -eq 'Dell') -and ($hintDell.EnterKey -match 'F2')) $hintDell.Vendor
-    $hintAcer = Get-FirmwareVendorHints -Manufacturer 'Acer' -Model 'Aspire A515'
+    $hintAcer = Get-FirmwareVendorHint -Manufacturer 'Acer' -Model 'Aspire A515'
     Assert-That 'Acer hint warns about the Supervisor Password' ($hintAcer.SecureBoot -match 'Supervisor Password')
-    $hintSurface = Get-FirmwareVendorHints -Manufacturer 'Microsoft Corporation' -Model 'Surface Laptop 5'
+    $hintSurface = Get-FirmwareVendorHint -Manufacturer 'Microsoft Corporation' -Model 'Surface Laptop 5'
     Assert-That 'Surface uses the volume-button entry method' ($hintSurface.EnterKey -match 'Volume Up')
-    $hintUnknown = Get-FirmwareVendorHints -Manufacturer 'Acme Computers' -Model 'X1'
+    $hintUnknown = Get-FirmwareVendorHint -Manufacturer 'Acme Computers' -Model 'X1'
     Assert-That 'Unknown manufacturer gets no invented menu path' (($null -eq $hintUnknown.TPM) -and ($null -eq $hintUnknown.EnterKey))
 
     $fwState = New-SyntheticState
@@ -3607,7 +3632,7 @@ function Invoke-SelfTest {
     $fwState.Firmware.SecureBootEnabled = $false
     $guidance = Get-FirmwareGuidance -State $fwState
     Assert-That 'Firmware guidance lists only what is actually wrong' (@($guidance.Needed).Count -eq 2) (@($guidance.Needed | Select-Object -ExpandProperty What) -join '; ')
-    Assert-That 'Firmware guidance is pure data, with no restart inside it' ($guidance.PSObject.Properties['CanOfferReboot'] -ne $null)
+    Assert-That 'Firmware guidance is pure data, with no restart inside it' ($null -ne $guidance.PSObject.Properties['CanOfferReboot'])
 
     $okState = New-SyntheticState
     Assert-That 'A correct machine needs no firmware changes' (@((Get-FirmwareGuidance -State $okState).Needed).Count -eq 0)
@@ -3669,7 +3694,7 @@ function Invoke-SelfTest {
     # --- HTML report ---
     $score2 = Get-SecurityScore -Statuses $cisStatuses
     $sc = Get-SecuredCoreVerdict -State $cisState -Statuses $cisStatuses
-    $explanations = @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $cisState })
+    $explanations = @(Get-ControlId | ForEach-Object { Get-ControlExplanation -Id $_ -State $cisState })
     $html = New-HtmlReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
     Assert-That 'HTML report is produced' ($html.Length -gt 3000) ('{0} bytes' -f $html.Length)
     Assert-That 'HTML report is self-contained' (($html -notmatch '<script') -and ($html -notmatch 'https?://[^"]*\.(css|js)')) 'no external css/js'
@@ -3682,7 +3707,7 @@ function Invoke-SelfTest {
     $injHtml = New-HtmlReport -State $injected -Statuses $injStatuses -Score (Get-SecurityScore -Statuses $injStatuses) `
         -SecuredCore (Get-SecuredCoreVerdict -State $injected -Statuses $injStatuses) `
         -Cis (Get-CisComplianceReport -State $injected -Statuses $injStatuses) `
-        -Explanations @(Get-ControlIds | ForEach-Object { Get-ControlExplanation -Id $_ -State $injected })
+        -Explanations @(Get-ControlId | ForEach-Object { Get-ControlExplanation -Id $_ -State $injected })
     Assert-That 'Hostile field content cannot inject markup' (-not ($injHtml -match '<script>alert\(1\)</script>')) 'model string is escaped'
 
     $textReport = New-TextReport -State $cisState -Statuses $cisStatuses -Score $score2 -SecuredCore $sc -Cis $cis2 -Explanations $explanations
@@ -3757,7 +3782,7 @@ function Show-Summary {
     }
 }
 
-function Show-NextSteps {
+function Show-NextStep {
     param($Explanations)
     $todo = @($Explanations | Where-Object { $_.Severity -ne 'Good' })
     Write-Section 'What to do next'
@@ -3819,7 +3844,7 @@ function Get-ReportFolder {
     return (Join-Path $desktop 'WinDSH-Reports')
 }
 
-function Save-Reports {
+function Save-Report {
     param($State, $Statuses, $Score, $SecuredCore, $Cis, $Explanations, [hashtable]$Formats)
     if ($NoReport) { return @() }
 
@@ -3933,23 +3958,23 @@ function Wait-ForKey {
 }
 
 function Show-Menu {
-    param($Statuses, $Score)
-    Write-Host ''
+    param($Score)
+    Write-Line ''
     Write-Line ('{0} {1}   applicable protection score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
-    Write-Host ''
+    Write-Line ''
     Write-Line '  [1] Re-check this computer' 'Plain'
     Write-Line '  [2] Fix what can be fixed safely' 'Plain'
     Write-Line '  [3] Explain a protection' 'Plain'
     Write-Line '  [4] Save a report' 'Plain'
     Write-Line '  [5] More options' 'Plain'
     Write-Line '  [Q] Quit' 'Plain'
-    Write-Host ''
+    Write-Line ''
 }
 
 function Show-MoreMenu {
-    Write-Host ''
+    Write-Line ''
     Write-Line 'More options' 'Head'
-    Write-Host ''
+    Write-Line ''
     Write-Line '  [A] Preview what "fix safely" would change' 'Plain'
     Write-Line '  [B] Turn on a specific protection' 'Plain'
     Write-Line '  [C] Undo a previous change' 'Plain'
@@ -3959,7 +3984,7 @@ function Show-MoreMenu {
     Write-Line '  [G] Why is Memory Integrity blocked? (driver diagnostics)' 'Plain'
     Write-Line '  [H] Open the Code Integrity event log' 'Plain'
     Write-Line '  [X] Back' 'Plain'
-    Write-Host ''
+    Write-Line ''
 }
 
 function Read-Choice {
@@ -3975,7 +4000,7 @@ function Read-Choice {
 
 function Select-ControlInteractive {
     Write-Line ''
-    $ids = Get-ControlIds
+    $ids = Get-ControlId
     $n = 0
     foreach ($id in $ids) { $n++; Write-Line ('  {0}. {1}' -f $n, (Get-Control -Id $id).PlainName) 'Plain' }
     $raw = Read-Host 'Number (blank to cancel)'
@@ -4014,11 +4039,11 @@ function Invoke-Interactive {
     $assessment = Get-Assessment -State $State
 
     Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
-    Show-NextSteps -Explanations $assessment.Explanations
+    Show-NextStep -Explanations $assessment.Explanations
 
     $changed = $false
     while ($true) {
-        Show-Menu -Statuses $assessment.Statuses -Score $assessment.Score
+        Show-Menu -Score $assessment.Score
         $choice = Read-Choice '12345Q'
 
         if ($choice -eq 'Q') {
@@ -4029,7 +4054,7 @@ function Invoke-Interactive {
                 if ($State.Restart.Pending) { Write-Line 'Note: Windows has its own restart pending, unrelated to this tool.' 'Dim' }
                 return
             }
-            $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
+            $paths = Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
             foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
             if ($script:RestartRequired) {
                 Write-Line ''
@@ -4043,7 +4068,7 @@ function Invoke-Interactive {
                 $State = Get-SystemState
                 $assessment = Get-Assessment -State $State
                 Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
-                Show-NextSteps -Explanations $assessment.Explanations
+                Show-NextStep -Explanations $assessment.Explanations
             }
             '2' {
                 $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $State
@@ -4074,7 +4099,7 @@ function Invoke-Interactive {
                 $script:HtmlSelected = [bool]($fmt -eq '1' -or $fmt -eq '4')
                 $script:TextSelected = [bool]($fmt -eq '2' -or $fmt -eq '4')
                 $script:JsonSelected = [bool]($fmt -eq '3' -or $fmt -eq '4')
-                $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
+                $paths = Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
                 foreach ($p in $paths) { Write-Line ('Saved: {0}' -f $p) 'Good' }
             }
             '5' {
@@ -4096,7 +4121,7 @@ function Invoke-Interactive {
                         }
                     }
                     'C' {
-                        $runs = Get-JournalRuns
+                        $runs = Get-JournalRun
                         if (@($runs).Count -eq 0) { Write-Line 'No recorded changes to undo.' 'Info' }
                         else {
                             Write-Section 'Recorded change runs'
@@ -4123,7 +4148,7 @@ function Invoke-Interactive {
                         # The restart is the caller's decision, never a side effect of rendering.
                         if ($guidance.CanOfferReboot) { [void](Invoke-RebootToFirmware -Guidance $guidance) }
                     }
-                    'G' { Show-CodeIntegrityDiagnostics -State $State }
+                    'G' { Show-CodeIntegrityDiagnostic }
                     'H' { [void](Open-CodeIntegrityEventViewer) }
                 }
             }
@@ -4137,6 +4162,9 @@ function Invoke-Interactive {
 # ---------------------------------------------------------------------------
 
 function Invoke-Main {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'The early Version exit preserves the existing plain console output contract.')]
+    param()
     Initialize-Console -DisableColor:$NoColor
 
     if ($Version) { Write-Host ('{0} {1}' -f $script:ToolName, $script:ToolVersion); $script:ExitCode = 0; return }
@@ -4166,14 +4194,14 @@ function Invoke-Main {
         $script:ExitCode = 1; return
     }
     if ($Enable) {
-        $Enable = @(ConvertTo-ControlIds -Ids $Enable)
+        $Enable = @(ConvertTo-ControlId -Ids $Enable)
         $script:InvocationParameters['Enable'] = $Enable
     }
     foreach ($controlId in (ConvertTo-Array $Enable)) {
-        if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+        if (-not (Test-CollectionMember (Get-ControlId) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
         if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
     }
-    if ($Explain -and -not (Test-Contains (Get-ControlIds) $Explain.Trim().ToLowerInvariant())) {
+    if ($Explain -and -not (Test-CollectionMember (Get-ControlId) $Explain.Trim().ToLowerInvariant())) {
         Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
         $script:ExitCode = 1; return
     }
@@ -4209,7 +4237,7 @@ function Invoke-Main {
 
     if (-not [string]::IsNullOrWhiteSpace($Explain)) {
         $id = $Explain.Trim().ToLowerInvariant()
-        if (-not (Test-Contains (Get-ControlIds) $id)) {
+        if (-not (Test-CollectionMember (Get-ControlId) $id)) {
             Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
             $script:ExitCode = 1; return
         }
@@ -4267,14 +4295,14 @@ function Invoke-Main {
     if ($Rmm) {
         # Automation writes files only when a format was explicitly selected.
         if ($HtmlReport -or $JsonReport -or $TextReport) {
-            [void](Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
+            [void](Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
         }
     }
     elseif ($unattended) {
         Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
-        Show-NextSteps -Explanations $assessment.Explanations
+        Show-NextStep -Explanations $assessment.Explanations
         if ($Advanced) { Show-CisSummary -Cis $assessment.Cis }
-        $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
+        $paths = Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
         foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
     }
     else { Invoke-Interactive -State $State }

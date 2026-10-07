@@ -26,6 +26,8 @@ function Get-StateLabel {
 }
 
 function New-HtmlReport {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Returns report markup only; file writes are handled separately.')]
     param(
         [Parameter(Mandatory = $true)]$State,
         [Parameter(Mandatory = $true)]$Statuses,

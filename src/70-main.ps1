@@ -54,7 +54,7 @@ function Show-Summary {
     }
 }
 
-function Show-NextSteps {
+function Show-NextStep {
     param($Explanations)
     $todo = @($Explanations | Where-Object { $_.Severity -ne 'Good' })
     Write-Section 'What to do next'
@@ -116,7 +116,7 @@ function Get-ReportFolder {
     return (Join-Path $desktop 'WinDSH-Reports')
 }
 
-function Save-Reports {
+function Save-Report {
     param($State, $Statuses, $Score, $SecuredCore, $Cis, $Explanations, [hashtable]$Formats)
     if ($NoReport) { return @() }
 
@@ -230,23 +230,23 @@ function Wait-ForKey {
 }
 
 function Show-Menu {
-    param($Statuses, $Score)
-    Write-Host ''
+    param($Score)
+    Write-Line ''
     Write-Line ('{0} {1}   applicable protection score {2}/100 ({3})' -f $script:ToolName, $script:ToolVersion, $Score.Score, $Score.Grade) 'Head'
-    Write-Host ''
+    Write-Line ''
     Write-Line '  [1] Re-check this computer' 'Plain'
     Write-Line '  [2] Fix what can be fixed safely' 'Plain'
     Write-Line '  [3] Explain a protection' 'Plain'
     Write-Line '  [4] Save a report' 'Plain'
     Write-Line '  [5] More options' 'Plain'
     Write-Line '  [Q] Quit' 'Plain'
-    Write-Host ''
+    Write-Line ''
 }
 
 function Show-MoreMenu {
-    Write-Host ''
+    Write-Line ''
     Write-Line 'More options' 'Head'
-    Write-Host ''
+    Write-Line ''
     Write-Line '  [A] Preview what "fix safely" would change' 'Plain'
     Write-Line '  [B] Turn on a specific protection' 'Plain'
     Write-Line '  [C] Undo a previous change' 'Plain'
@@ -256,7 +256,7 @@ function Show-MoreMenu {
     Write-Line '  [G] Why is Memory Integrity blocked? (driver diagnostics)' 'Plain'
     Write-Line '  [H] Open the Code Integrity event log' 'Plain'
     Write-Line '  [X] Back' 'Plain'
-    Write-Host ''
+    Write-Line ''
 }
 
 function Read-Choice {
@@ -272,7 +272,7 @@ function Read-Choice {
 
 function Select-ControlInteractive {
     Write-Line ''
-    $ids = Get-ControlIds
+    $ids = Get-ControlId
     $n = 0
     foreach ($id in $ids) { $n++; Write-Line ('  {0}. {1}' -f $n, (Get-Control -Id $id).PlainName) 'Plain' }
     $raw = Read-Host 'Number (blank to cancel)'
@@ -311,11 +311,11 @@ function Invoke-Interactive {
     $assessment = Get-Assessment -State $State
 
     Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
-    Show-NextSteps -Explanations $assessment.Explanations
+    Show-NextStep -Explanations $assessment.Explanations
 
     $changed = $false
     while ($true) {
-        Show-Menu -Statuses $assessment.Statuses -Score $assessment.Score
+        Show-Menu -Score $assessment.Score
         $choice = Read-Choice '12345Q'
 
         if ($choice -eq 'Q') {
@@ -326,7 +326,7 @@ function Invoke-Interactive {
                 if ($State.Restart.Pending) { Write-Line 'Note: Windows has its own restart pending, unrelated to this tool.' 'Dim' }
                 return
             }
-            $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
+            $paths = Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
             foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
             if ($script:RestartRequired) {
                 Write-Line ''
@@ -340,7 +340,7 @@ function Invoke-Interactive {
                 $State = Get-SystemState
                 $assessment = Get-Assessment -State $State
                 Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
-                Show-NextSteps -Explanations $assessment.Explanations
+                Show-NextStep -Explanations $assessment.Explanations
             }
             '2' {
                 $result = Invoke-ControlApply -Ids $script:SafeControlSet -State $State
@@ -371,7 +371,7 @@ function Invoke-Interactive {
                 $script:HtmlSelected = [bool]($fmt -eq '1' -or $fmt -eq '4')
                 $script:TextSelected = [bool]($fmt -eq '2' -or $fmt -eq '4')
                 $script:JsonSelected = [bool]($fmt -eq '3' -or $fmt -eq '4')
-                $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
+                $paths = Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations -Formats @{ Html = $script:HtmlSelected; Text = $script:TextSelected; Json = $script:JsonSelected }
                 foreach ($p in $paths) { Write-Line ('Saved: {0}' -f $p) 'Good' }
             }
             '5' {
@@ -393,7 +393,7 @@ function Invoke-Interactive {
                         }
                     }
                     'C' {
-                        $runs = Get-JournalRuns
+                        $runs = Get-JournalRun
                         if (@($runs).Count -eq 0) { Write-Line 'No recorded changes to undo.' 'Info' }
                         else {
                             Write-Section 'Recorded change runs'
@@ -420,7 +420,7 @@ function Invoke-Interactive {
                         # The restart is the caller's decision, never a side effect of rendering.
                         if ($guidance.CanOfferReboot) { [void](Invoke-RebootToFirmware -Guidance $guidance) }
                     }
-                    'G' { Show-CodeIntegrityDiagnostics -State $State }
+                    'G' { Show-CodeIntegrityDiagnostic }
                     'H' { [void](Open-CodeIntegrityEventViewer) }
                 }
             }
@@ -434,6 +434,9 @@ function Invoke-Interactive {
 # ---------------------------------------------------------------------------
 
 function Invoke-Main {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+        Justification = 'The early Version exit preserves the existing plain console output contract.')]
+    param()
     Initialize-Console -DisableColor:$NoColor
 
     if ($Version) { Write-Host ('{0} {1}' -f $script:ToolName, $script:ToolVersion); $script:ExitCode = 0; return }
@@ -463,14 +466,14 @@ function Invoke-Main {
         $script:ExitCode = 1; return
     }
     if ($Enable) {
-        $Enable = @(ConvertTo-ControlIds -Ids $Enable)
+        $Enable = @(ConvertTo-ControlId -Ids $Enable)
         $script:InvocationParameters['Enable'] = $Enable
     }
     foreach ($controlId in (ConvertTo-Array $Enable)) {
-        if (-not (Test-Contains (Get-ControlIds) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
+        if (-not (Test-CollectionMember (Get-ControlId) $controlId)) { Write-Line ('Unknown control "{0}".' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
         if (-not (Get-Control -Id $controlId).Remediable) { Write-Line ('Control "{0}" is report-only.' -f $controlId) 'Bad'; $script:ExitCode = 1; return }
     }
-    if ($Explain -and -not (Test-Contains (Get-ControlIds) $Explain.Trim().ToLowerInvariant())) {
+    if ($Explain -and -not (Test-CollectionMember (Get-ControlId) $Explain.Trim().ToLowerInvariant())) {
         Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
         $script:ExitCode = 1; return
     }
@@ -506,7 +509,7 @@ function Invoke-Main {
 
     if (-not [string]::IsNullOrWhiteSpace($Explain)) {
         $id = $Explain.Trim().ToLowerInvariant()
-        if (-not (Test-Contains (Get-ControlIds) $id)) {
+        if (-not (Test-CollectionMember (Get-ControlId) $id)) {
             Write-Line ('Unknown control "{0}". Use -ListControls to see valid ids.' -f $Explain) 'Bad'
             $script:ExitCode = 1; return
         }
@@ -564,14 +567,14 @@ function Invoke-Main {
     if ($Rmm) {
         # Automation writes files only when a format was explicitly selected.
         if ($HtmlReport -or $JsonReport -or $TextReport) {
-            [void](Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
+            [void](Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations)
         }
     }
     elseif ($unattended) {
         Show-Summary -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore
-        Show-NextSteps -Explanations $assessment.Explanations
+        Show-NextStep -Explanations $assessment.Explanations
         if ($Advanced) { Show-CisSummary -Cis $assessment.Cis }
-        $paths = Save-Reports -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
+        $paths = Save-Report -State $State -Statuses $assessment.Statuses -Score $assessment.Score -SecuredCore $assessment.SecuredCore -Cis $assessment.Cis -Explanations $assessment.Explanations
         foreach ($p in $paths) { Write-Line ('Report saved: {0}' -f $p) 'Good' }
     }
     else { Invoke-Interactive -State $State }
