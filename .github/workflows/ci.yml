@@ -135,24 +135,8 @@ jobs:
         run: |
           $pin = (Get-Content -Raw .\.github\psgallery-lock.json | ConvertFrom-Json).PSScriptAnalyzer
           Import-Module "$env:RUNNER_TEMP\windsh-verified-modules\PSScriptAnalyzer\$($pin.version)\PSScriptAnalyzer.psd1" -Force
-          # Analyse src/ rather than the generated file, so findings point at real source.
-          $results = @(Invoke-ScriptAnalyzer -Path "$env:GITHUB_WORKSPACE\src" -Recurse) +
-                     @(Invoke-ScriptAnalyzer -Path "$env:GITHUB_WORKSPACE\build")
-
-          if ($results.Count -gt 0) {
-              $results | Select-Object RuleName, Severity, Line, ScriptName, Message |
-                  Format-Table -AutoSize | Out-String -Width 240 | Write-Host
-          }
-
-          $errors = @($results | Where-Object { $_.Severity -eq 'Error' })
-          if ($errors.Count -gt 0) {
-              Write-Host "::error::PSScriptAnalyzer reported $($errors.Count) error(s)."
-              exit 1
-          }
-          foreach ($w in @($results | Where-Object { $_.Severity -eq 'Warning' })) {
-              Write-Host "::warning file=$($w.ScriptName),line=$($w.Line)::$($w.RuleName): $($w.Message)"
-          }
-          Write-Host "PSScriptAnalyzer: 0 errors."
+          # Use the same zero-error/zero-warning check contributors run locally.
+          .\build\Test-CodeQuality.ps1
 
       - name: Install Pester
         run: |

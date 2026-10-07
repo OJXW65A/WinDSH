@@ -154,14 +154,36 @@ defect in this project:
 
 Add a regression test for every bug you fix.
 
+## Verified development dependencies
+
+Use a normal PowerShell session at the repository root. The package versions and
+SHA-256 hashes in the [dependency lock](https://github.com/OJXW65A/WinDSH/blob/main/.github/psgallery-lock.json) are the
+same pins CI uses; do not install an unversioned latest module instead.
+
+```powershell
+.\build\Install-CIDependencies.ps1 -Name Pester
+.\build\Install-CIDependencies.ps1 -Name PSScriptAnalyzer
+```
+
+The installer downloads each package from PowerShell Gallery, verifies its hash
+before extraction/import, and imports it into the current session from a fresh
+temporary directory. It requires internet access, but does not require administrator
+rights, mark a repository trusted, or modify persistent execution policy. Repeat this
+setup in each new session and in both Windows PowerShell 5.1 and PowerShell 7.
+If organization policy blocks script execution, use an approved development environment;
+do not weaken that policy to run these commands.
+
 ## Running the tests
 
 WinDSH uses Pester regression tests.
 
-From the repository root:
+After importing the verified dependencies above:
 
 ```powershell
-Invoke-Pester -Path .\tests
+$result = Invoke-Pester -Path .\tests -PassThru
+if ($result.Result -ne 'Passed' -or $result.PassedCount -eq 0) {
+    throw 'The test run failed or did not execute any passing tests.'
+}
 ```
 
 The GitHub Actions CI workflow also checks:
@@ -170,7 +192,7 @@ The GitHub Actions CI workflow also checks:
 - `WinDSH.ps1` is current with `src/`
 - Windows PowerShell 5.1 parsing
 - PowerShell 7 parsing
-- PSScriptAnalyzer (build fails on Error severity)
+- PSScriptAnalyzer (build fails on Error or Warning severity)
 - Pester regression tests on both runtimes
 - a live `-AuditOnly` run produces a structurally valid JSON report
 - `-RMM` emits exactly one JSON object on stdout
@@ -183,15 +205,21 @@ All CI jobs should pass before a pull request is considered ready.
 
 ## PSScriptAnalyzer
 
-You can run PSScriptAnalyzer locally with:
+After importing verified PSScriptAnalyzer, run the same check as CI:
 
 ```powershell
-Install-Module PSScriptAnalyzer -Scope CurrentUser
-Invoke-ScriptAnalyzer -Path .\src -Recurse
-Invoke-ScriptAnalyzer -Path .\build
+.\build\Test-CodeQuality.ps1
 ```
 
-Warnings should be reviewed. New analyzer errors should not be introduced.
+The baseline is zero errors and zero warnings. Fix findings rather than disabling
+rules repository-wide. Existing `SuppressMessageAttribute` exceptions are scoped to
+specific functions or build scripts and explain why a rule does not apply:
+
+- console/build diagnostics intentionally use the host stream, separate from RMM JSON;
+- provider and report factories return data without performing machine changes;
+- synthetic test doubles retain the real provider's parameter signature.
+
+Any new exception requires a similarly narrow scope and a written justification.
 
 ## Preview changes before remediation
 
@@ -260,6 +288,10 @@ Do not commit generated content such as:
 - release ZIP archives
 - temporary files
 - test-result output
+
+The generated `WinDSH.ps1` is the required exception and must be committed after
+source changes. The labeled synthetic report sample and its preview are documentation
+fixtures, not reports from a user's computer; see [the sample guide](docs/SAMPLE_REPORT.md).
 
 The repository `.gitignore` excludes common generated files.
 
